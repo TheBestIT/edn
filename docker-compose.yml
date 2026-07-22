@@ -5,6 +5,8 @@ services:
       - 8000:8000
     env_file:
       - ./.env
+    environment:
+      DOCKERIZED: 1
     depends_on:
       - mongodb
   

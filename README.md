@@ -27,9 +27,9 @@ API that downstream projects — a GUI, a CLI, SDKs — can be built on top of.
 ### Phase 1 — Core webserver & API
 - [X] Webserver (Django, ASGI for streaming/async plugin routes)
 - [X] REST API layer with versioning (`/api/v1/…`)
-- [ ] Authentication: API keys + token/JWT sessions
-- [ ] Auto-generated OpenAPI schema (the contract every future client builds on)
-- [ ] Structured error model, request/response envelopes, pagination conventions
+- [X] Authentication: API keys + token/JWT sessions
+- [X] Auto-generated OpenAPI schema (the contract every future client builds on)
+- [X] Structured error model, request/response envelopes, pagination conventions
 - [ ] Rate limiting and per-key quotas
 
 ### Phase 2 — Storage & database
