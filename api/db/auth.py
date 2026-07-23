@@ -23,7 +23,6 @@ class Auth:
         token_generation = APIToken(
             token=str(uuid.uuid4()),
             created_at=datetime.datetime.now().timestamp(),
-            last_used=0
         )
 
         self.logger.log(token_generation.to_dict())
@@ -35,3 +34,16 @@ class Auth:
 
         self.logger.log("Failed to insert new token")
         return None
+
+    def get_APIToken_from_token_string(self, token: str) -> APIToken | None:
+        self.logger.log(f"Requested APIToken object from token '{token}'")
+        query = self.collection.find_one({"token": token})
+        return APIToken().from_dict(query) if query is not None else None
+
+    def get_APIToken_from_META_headers(self, META) -> APIToken | None:
+        self.logger.log("Requested APIToken from META Headers")
+        authorization_header = META.get('HTTP_AUTHORIZATION')
+        if authorization_header is None: return None
+        token = authorization_header.replace("Bearer ", "")
+        query = self.get_APIToken_from_token_string(token)
+        return query

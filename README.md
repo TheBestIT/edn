@@ -30,7 +30,7 @@ API that downstream projects — a GUI, a CLI, SDKs — can be built on top of.
 - [X] Authentication: API keys + token/JWT sessions
 - [X] Auto-generated OpenAPI schema (the contract every future client builds on)
 - [X] Structured error model, request/response envelopes, pagination conventions
-- [ ] Rate limiting and per-key quotas
+- [X] Rate limiting and per-key quotas
 
 ### Phase 2 — Storage & database
 - [ ] Database schema for nodes and metadata

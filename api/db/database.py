@@ -3,6 +3,8 @@ from typing_extensions import Self
 import pymongo
 from pymongo.collection import Collection as MongoCollection
 from pymongo.results import InsertOneResult
+from pymongo.cursor import Cursor
+from typing import Any
 import json, os
 from api.misc.logger import Logger
 from api.db.models import Model
@@ -16,6 +18,11 @@ class Collection:
         result = self.collection.insert_one(document.to_dict())
         document._id = result.inserted_id
         self.logger.log(f"insert_one called on collection with data: {document.to_dict()}. {result.acknowledged=}; {result.inserted_id=}")
+        return result
+
+    def find_one(self, filter: dict, projection: dict | None = None):
+        result = self.collection.find_one(filter, projection or None)
+        self.logger.log(f"find_one called on collection with data: {filter=}; {projection=}. matched={result is not None}")
         return result
 
 

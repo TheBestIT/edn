@@ -55,7 +55,33 @@ class Model:
 
 
 @attrs.define(kw_only=True)
+class APIUsage:
+    bucket_size: int = 1000
+    bucket_refill_rate: float = 5.0  # tokens per second
+    bucket_expire_rate: float = attrs.field(
+        default=attrs.Factory(
+            lambda self: self.bucket_size / self.bucket_refill_rate,
+            takes_self=True,
+        )
+    )
+
+def _as_usage(value: Any) -> APIUsage:
+    if isinstance(value, APIUsage):
+        return value
+    if value is None:
+        return APIUsage()
+    return APIUsage(**value)
+
+
+@attrs.define(kw_only=True)
 class APIToken(Model):
-    token: str
-    created_at: float
-    last_used: float
+    token: str          = ""
+    created_at: float   = 0.0
+    usage: APIUsage     = attrs.field(factory=APIUsage, converter=_as_usage)
+
+@attrs.define(kw_only=True)
+class RateLimitResponse(Model):
+    allowed: bool
+    tokens: float
+    retry_after: float
+    usage_policy: APIUsage = attrs.field(converter=_as_usage)
