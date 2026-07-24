@@ -71,6 +71,7 @@ class Cache:
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
+        self.per_byte_cost = 0.0001192093
 
         self.logger = Logger("cache.master")
 
@@ -88,7 +89,7 @@ class Cache:
 
         self.check_rate = self.client.register_script(atomic)
 
-    def validate_request(self, token: APIToken, cost: int) -> RateLimitResponse:
+    def validate_request(self, token: APIToken, cost: float) -> RateLimitResponse:
         allowed, tokens, retry_after = cast(
             "list[Any]",
             self.check_rate(

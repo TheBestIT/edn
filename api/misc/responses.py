@@ -7,3 +7,5 @@ class ResponseCodes:
     CREATED = 201
     MALFORMED = 400
     LIMITED = 429
+    TOO_LARGE = 413
+    INSUFFICIENT_STORAGE = 507

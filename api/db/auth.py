@@ -18,6 +18,7 @@ class Auth:
         self.logger = Logger("database.auth")
         self.collection = Database().get_collection("auth")
         self.logger.log("Got reference to 'auth' Collection")
+        self.collection.create_index("token", is_unique=True)
 
     def generate_api_token(self) -> APIToken | None:
         token_generation = APIToken(
@@ -27,6 +28,10 @@ class Auth:
 
         self.logger.log(token_generation.to_dict())
         query = self.collection.insert_one(token_generation)
+
+        if query is None:
+            self.logger.log("uuid.uuid4() generated the same token two times...")
+            return self.generate_api_token() # recurse...
 
         if query.acknowledged:
             self.logger.log(f"Inserted new token ('{token_generation.token}') successfully")

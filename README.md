@@ -33,10 +33,10 @@ API that downstream projects — a GUI, a CLI, SDKs — can be built on top of.
 - [X] Rate limiting and per-key quotas
 
 ### Phase 2 — Storage & database
-- [ ] Database schema for nodes and metadata
-- [ ] Storage backend abstraction (interface first: local disk, then S3-compatible)
-- [ ] Content-addressed blob store (store by hash; enables dedup)
-- [ ] Data clusters / sharding strategy for scaling storage horizontally
+- [X] Database schema for nodes and metadata
+- [X] Storage backend abstraction (interface first: local disk, then S3-compatible)
+- [X] Content-addressed blob store (store by hash; enables dedup)
+- [X] Data clusters / sharding strategy for scaling storage horizontally
 - [ ] Background job/worker layer (for indexing, encryption, plugin fetches)
 
 ### Phase 3 — Virtual filesystem
