@@ -1,11 +1,12 @@
 from typing_extensions import Self
 from pymongo import ReplaceOne
+from bson import ObjectId
 
 from api.db.database import Database
 from api.misc.logger import Logger
-from api.db.models import StorageNode, NodeStatus, File
+from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType
 
-from typing import List
+from typing import List, Optional
 
 class Filesystem:
     instance = None
@@ -26,7 +27,8 @@ class Filesystem:
         self.max_blob_size = 8 * 1024 * 1024 # 8GB
 
         self.nodes_collection.create_index("address", is_unique=True)
-        self.fs_collection.create_index("hashed", is_unique=True)
+        self.fs_collection.collection.create_index([("parent_id", 1), ("name", 1)], unique=True)
+        self.fs_collection.collection.create_index("hashed", partialFilterExpression={"hashed": {"$exists": True}})
 
         self.cached_nodes: List[StorageNode] = []
         cursor = self.nodes_collection.find({}) # Get all nodes
@@ -56,6 +58,13 @@ class Filesystem:
 
         return True if query.acknowledged else False
 
+    def get_node_from_address(self, address: str) -> StorageNode | None:
+        for node in self.cached_nodes:
+            if node.address == address and node.health.status == NodeStatus.ALIVE:
+                return node
+
+        return None
+
     def get_first_suitable_node(self, blob_byte_size: int) -> StorageNode | None:
         target_node: StorageNode | None = None
 
@@ -75,3 +84,31 @@ class Filesystem:
 
         if query is None: return False
         return query.acknowledged
+
+    def sign_new_dir(self, dir: Directory) -> bool:
+        query = self.fs_collection.insert_one(dir)
+        self.logger.log(f"Attempted to sign new Directory ({dir.name}) in the db. query={query.acknowledged if query is not None else 'None'}")
+
+        if query is None: return False
+        return query.acknowledged
+
+    def get_child_dir_from_folder(self, origin: ObjectId | None, child_name: str) -> Directory | None:
+        query = self.fs_collection.find_one({"parent_id": origin, "name": child_name, "node_type": INodeType.DIR})
+        return Directory().from_dict(query) if query is not None else None
+    
+    # Returns the traversed path in the order of the given path
+    def traverse_full_path(self, path: List[str]) -> List[ObjectId] | None:
+        last_dir: Optional[Directory] = None
+        traversed_list = []
+        for dir in path:
+            if last_dir is None:
+                query = self.get_child_dir_from_folder(None, dir)
+                if query is None: return None # broken tree chain
+                last_dir = query
+                traversed_list.append(query._id)
+                continue
+            query = last_dir.get_child_dir(dir)
+            if query is None: return None
+            traversed_list.append(query._id)
+            
+        return traversed_list

@@ -8,18 +8,18 @@ from pymongo.cursor import Cursor
 from typing import Any, List
 import json, os
 from api.misc.logger import Logger
-from api.db.models import Model
+from api.db.models import Model, INode
 
 class Collection:
     def __init__(self, collection: MongoCollection) -> None:
         self.logger = Logger(f"database.collection.{collection.name}")
         self.collection = collection
 
-    def insert_one(self, document: Model) -> InsertOneResult | None:
+    def insert_one(self, document: Model | INode) -> InsertOneResult | None:
         try:
             result = self.collection.insert_one(document.to_dict())
         except DuplicateKeyError:
-            self.logger.log("insert_one called with duplicate document")
+            self.logger.log(f"insert_one called with duplicate {document=}")
             return None
         document._id = result.inserted_id
         self.logger.log(f"insert_one called on collection with data: {document.to_dict()}. {result.acknowledged=}; {result.inserted_id=}")

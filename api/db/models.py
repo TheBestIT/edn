@@ -139,16 +139,19 @@ class StorageNode(Model):
         try:
             query = requests.request("GET", f"http://{self.address}:{self.port}/health")
         except:
-            self.health.status = NodeStatus.DEAD
-            logger.log("Marking node as DEAD.")
+            if self.health.status != NodeStatus.DEAD:
+                self.health.status = NodeStatus.DEAD
+                logger.log("Marking node as DEAD.")
             return
 
         if query.status_code != 200:
-            self.health.status = NodeStatus.DEAD
-            logger.log("Marking node as DEAD.")
+            if self.health.status != NodeStatus.DEAD:
+                self.health.status = NodeStatus.DEAD
+                logger.log("Marking node as DEAD.")
             return
         
         data = query.json()
+        last_heath                  = self.health.status
         self.health.status          = NodeStatus.ALIVE if data["status"] == "ok" else NodeStatus.UNAVAILABLE
         self.health.last_heartbeat  = datetime.now().timestamp()
         self.health.version         = data["version"]
@@ -161,13 +164,83 @@ class StorageNode(Model):
             self.health.store.available_bytes   = data["store"]["available_bytes"]
             self.health.store.used_percent      = data["store"]["used_percent"]
 
-        logger.log(f"Marking node as {self.health.status.name}")
+        if last_heath != self.health.status: logger.log(f"Marking node as {self.health.status.name}")
+
+# Filesystem
+
+class INodeType(int, Enum):
+    DIR = 0
+    FILE = 1
+    SYMLINK = 2
 
 @attrs.define(kw_only=True)
-class File(Model):
-    hashed: str
-    content_type: str
-    filename: str
-    size: int
-    created_at: float
-    hosted_node_address: str
+class Permissions:
+    owner: str | None = None 
+
+def _as_Ownership(value: Any) -> Permissions:
+    if isinstance(value, Permissions):
+        return value
+    if value is None:
+        return Permissions()
+    return Permissions(**value)
+
+
+@attrs.define(kw_only=True)
+class INode():
+    _id: Optional[ObjectId] = None
+    parent_id: Optional[ObjectId] = None
+    name: Optional[str] = None 
+    node_type: Optional[INodeType] = None
+
+    permissions: Permissions = attrs.field(factory=Permissions, converter=_as_Ownership)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = attrs.asdict(self, recurse=True)
+        if data.get("_id") is None:
+            data.pop("_id", None)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
+        kwargs = {
+            field.alias: data[field.name]
+            for field in attrs.fields(cls)
+            if field.name in data
+        }
+        return cls(**kwargs)
+
+    def to_json(self, **kwargs: Any) -> str:
+        return json_util.dumps(self.to_dict(), **kwargs)
+
+    @classmethod
+    def from_json(cls, raw: str | bytes) -> Self:
+        return cls.from_dict(json_util.loads(raw))
+
+    def to_public(self) -> dict[str, Any]:
+        data = self.to_dict()
+        oid = data.pop("_id", None)
+        public: dict[str, Any] = {"id": str(oid)} if oid is not None else {}
+        public.update({k: _jsonable(v) for k, v in data.items()})
+        return public
+
+@attrs.define(kw_only=True)
+class File(INode):
+    hashed: Optional[str] = None
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+    created_at: Optional[float] = None 
+    hosted_node_address: Optional[str] = None
+
+@attrs.define(kw_only=True)
+class Directory(INode):
+    created_at: Optional[float] = None
+
+    def get_child_dir(self, child_name: str) -> Directory | None:
+        if self._id is None: return None
+        Logger(f"INode:DIR-{self._id}").log(f"Traversing to '{child_name}'")
+        from api.db.filesystem import Filesystem
+        return Filesystem().get_child_dir_from_folder(self._id, child_name)
+
+@attrs.define(kw_only=True)
+class Symlink(INode):
+    target: str

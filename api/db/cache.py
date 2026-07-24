@@ -71,7 +71,11 @@ class Cache:
         if getattr(self, "_initialized", False):
             return
         self._initialized = True
-        self.per_byte_cost = 0.0001192093
+
+        # TODO: better values... and a db-centered value calculation 
+        self.per_byte_cost      = 0.0001192093
+        self.per_dir_cost       = 10 
+        self.per_existing_cost  = 10
 
         self.logger = Logger("cache.master")
 

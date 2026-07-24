@@ -9,3 +9,5 @@ class ResponseCodes:
     LIMITED = 429
     TOO_LARGE = 413
     INSUFFICIENT_STORAGE = 507
+    NOT_FOUND = 404
+    UNAVAILABLE = 503
