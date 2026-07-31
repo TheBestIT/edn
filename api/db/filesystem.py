@@ -3,7 +3,7 @@ from pymongo import ReplaceOne
 from bson import ObjectId
 
 from api.db.database import Database
-from api.misc.logger import Logger
+from api.misc.logger import Logger, LoggerLevel
 from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType
 
 from typing import List, Optional
@@ -21,7 +21,7 @@ class Filesystem:
             return
         self._initialized = True
 
-        self.logger = Logger("database.filesystem")
+        self.logger = Logger("database.filesystem", LoggerLevel.DATABASE)
         self.fs_collection = Database().get_collection("filesystem")
         self.nodes_collection = Database().get_collection("nodes")
         self.max_blob_size = 8 * 1024 * 1024 # 8GB

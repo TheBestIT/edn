@@ -7,12 +7,12 @@ from pymongo.errors import DuplicateKeyError
 from pymongo.cursor import Cursor
 from typing import Any, List
 import json, os
-from api.misc.logger import Logger
+from api.misc.logger import Logger, LoggerLevel
 from api.db.models import Model, INode
 
 class Collection:
     def __init__(self, collection: MongoCollection) -> None:
-        self.logger = Logger(f"database.collection.{collection.name}")
+        self.logger = Logger(f"database.collection.{collection.name}", LoggerLevel.VERBOSE)
         self.collection = collection
 
     def insert_one(self, document: Model | INode) -> InsertOneResult | None:

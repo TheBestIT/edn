@@ -4,7 +4,7 @@ from typing_extensions import Self
 import os
 import redis
 
-from api.misc.logger import Logger
+from api.misc.logger import Logger, LoggerLevel
 from api.db.models import APIToken, APIUsage, RateLimitResponse
 
 # KEYS[1] should be the token
@@ -77,7 +77,7 @@ class Cache:
         self.per_dir_cost       = 10 
         self.per_existing_cost  = 10
 
-        self.logger = Logger("cache.master")
+        self.logger = Logger("cache.master", LoggerLevel.DATABASE)
 
         dockerized = os.environ.get("DOCKERIZED", "0") == "1"
         uri = os.environ.get("EDN_REDIS_URL_DOCKER") if dockerized else os.environ.get("EDN_REDIS_URL")

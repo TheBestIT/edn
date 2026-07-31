@@ -7,7 +7,7 @@ from enum import Enum
 import attrs, requests
 from bson import ObjectId, json_util
 from typing_extensions import Self
-from api.misc.logger import Logger
+from api.misc.logger import Logger, LoggerLevel
 
 
 def _jsonable(value: Any) -> Any:
@@ -135,7 +135,7 @@ class StorageNode(Model):
     health: NodeHealth = attrs.field(factory=NodeHealth, converter=_as_NodeHealth)
 
     def check_health(self):
-        logger = Logger(f"StorageNode@{self.address}:{self.port}")
+        logger = Logger(f"StorageNode@{self.address}:{self.port}", LoggerLevel.VERBOSE)
         try:
             query = requests.request("GET", f"http://{self.address}:{self.port}/health")
         except:

@@ -1,7 +1,7 @@
 from typing_extensions import Self
 import threading, time
 
-from api.misc.logger import Logger
+from api.misc.logger import Logger, LoggerLevel
 from api.db.filesystem import Filesystem
 
 class Scheduler:
@@ -20,7 +20,7 @@ class Scheduler:
         self.elapsed = 0
         self.terminate = False
 
-        self.logger = Logger("init.scheduler")
+        self.logger = Logger("init.scheduler", LoggerLevel.ENDPOINT)
         self.logger.log("Initialized Scheduler")
 
         self.scheduler_thread = threading.Thread(target=self.__tick, daemon=True)

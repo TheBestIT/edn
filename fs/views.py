@@ -6,7 +6,7 @@ from api.db.models import APIToken, StorageNode, File, INodeType, Permissions, D
 from api.db.auth import Auth
 from api.misc.responses import ResponseCodes as code
 from api.db.cache import Cache
-from api.misc.logger import Logger
+from api.misc.logger import Logger, LoggerLevel
 import tempfile, hashlib, requests, re, datetime
 from django.http import StreamingHttpResponse
 
@@ -64,7 +64,7 @@ def put_file(request, parent_id, filename):
             if not rate_query.allowed:
                 return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
 
-            Logger(f"upload:${blob_hash}").log(f"Calling PUT to node @{node.address}:{node.port} of file of COST={total_bytes*ratelimit.per_byte_cost} ({total_bytes=} at {ratelimit.per_byte_cost} tokens/byte)")
+            Logger(f"upload:${blob_hash}", LoggerLevel.ENDPOINT).log(f"Calling PUT to node @{node.address}:{node.port} of file of COST={total_bytes*ratelimit.per_byte_cost} ({total_bytes=} at {ratelimit.per_byte_cost} tokens/byte)")
 
             # Allow operation and passthrough blob
             node_request = requests.put(f"http://{node.address}:{node.port}/blob/{blob_hash}", data=spool)

@@ -2,7 +2,7 @@ from typing_extensions import Self
 
 import pymongo, datetime, uuid
 from api.db.database import Database, Collection
-from api.misc.logger import Logger
+from api.misc.logger import Logger, LoggerLevel
 
 from api.db.models import APIToken
 
@@ -15,7 +15,7 @@ class Auth:
         return cls.instance
 
     def __init__(self) -> None:
-        self.logger = Logger("database.auth")
+        self.logger = Logger("database.auth", LoggerLevel.DATABASE)
         self.collection = Database().get_collection("auth")
         self.logger.log("Got reference to 'auth' Collection")
         self.collection.create_index("token", is_unique=True)
