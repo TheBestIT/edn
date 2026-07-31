@@ -44,6 +44,16 @@ class Collection:
         self.collection.create_index(keys, unique=is_unique)
         self.logger.log(f"create_index called on collection with {keys=}; {is_unique=}.")
 
+    def delete_one(self, filter: dict) -> bool:
+        query = self.collection.delete_one(filter)
+        self.logger.log(f"delete_one called on collection with {filter=}; {query.acknowledged=}.")
+        return query.acknowledged
+
+    def count_documents(self, filter: dict) -> int:
+        query = self.collection.count_documents(filter)
+        self.logger.log(f"count_documents called on collection with {filter=}. count={query}")
+        return query
+
     def exists(self, filter: dict):
         return False if self.find_one(filter) is None else True
 

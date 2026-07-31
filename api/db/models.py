@@ -243,4 +243,5 @@ class Directory(INode):
 
 @attrs.define(kw_only=True)
 class Symlink(INode):
-    target: str
+    target: Optional[str] = None
+    created_at: Optional[float] = None 

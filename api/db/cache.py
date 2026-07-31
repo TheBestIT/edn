@@ -76,6 +76,7 @@ class Cache:
         self.per_byte_cost      = 0.0001192093
         self.per_dir_cost       = 10 
         self.per_existing_cost  = 10
+        self.per_symlink_cost   = 100
 
         self.logger = Logger("cache.master", LoggerLevel.DATABASE)
 

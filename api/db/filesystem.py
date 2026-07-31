@@ -1,10 +1,11 @@
 from typing_extensions import Self
 from pymongo import ReplaceOne
 from bson import ObjectId
+import requests
 
 from api.db.database import Database
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType
+from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType, Symlink
 
 from typing import List, Optional
 
@@ -92,9 +93,29 @@ class Filesystem:
         if query is None: return False
         return query.acknowledged
 
+    def sign_new_symlink(self, symlink: Symlink) -> bool:
+        query = self.fs_collection.insert_one(symlink)
+        self.logger.log(f"Attempted to sign new Symlink ({symlink.name} -> {symlink.target}) in the db. query={query.acknowledged if query is not None else 'None'}")
+        
+        if query is None: return False
+        return query.acknowledged
+
     def get_child_dir_from_folder(self, origin: ObjectId | None, child_name: str) -> Directory | None:
         query = self.fs_collection.find_one({"parent_id": origin, "name": child_name, "node_type": INodeType.DIR})
         return Directory().from_dict(query) if query is not None else None
+
+    def delete_from_node(self, file: File) -> bool:
+        if file.hosted_node_address is None: return False
+        hosting_node = self.get_node_from_address(file.hosted_node_address)
+        file_hash = file.hashed
+        
+        if hosting_node is None: return False
+
+        query = requests.delete(f"http://{hosting_node.address}:{hosting_node.port}/blob/{file_hash}")
+
+        self.logger.log(f"Querying deletion of {file_hash=} from Node@{hosting_node.address}:{hosting_node.port}. {query.status_code=}")
+        
+        return True if query.status_code == 200 else False
     
     # Returns the traversed path in the order of the given path
     def traverse_full_path(self, path: List[str]) -> List[ObjectId] | None:
@@ -110,5 +131,6 @@ class Filesystem:
             query = last_dir.get_child_dir(dir)
             if query is None: return None
             traversed_list.append(query._id)
+            last_dir = query
             
         return traversed_list

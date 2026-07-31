@@ -11,3 +11,5 @@ class ResponseCodes:
     INSUFFICIENT_STORAGE = 507
     NOT_FOUND = 404
     UNAVAILABLE = 503
+    FORBIDDEN = 403
+    CONFLICT = 409

@@ -2,13 +2,15 @@ from typing import Any, Optional
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from api.db.filesystem import Filesystem
-from api.db.models import APIToken, StorageNode, File, INodeType, Permissions, Directory, RateLimitResponse, APIUsage, _jsonable
+from api.db.models import APIToken, StorageNode, File, INodeType, Permissions, Directory, RateLimitResponse, Symlink, _jsonable
 from api.db.auth import Auth
 from api.misc.responses import ResponseCodes as code
 from api.db.cache import Cache
 from api.misc.logger import Logger, LoggerLevel
 import tempfile, hashlib, requests, re, datetime
 from django.http import StreamingHttpResponse
+import json
+from typing import List
 
 _UNSAFE = re.compile(r"[^\w.\- ]")
 
@@ -19,10 +21,7 @@ def sanitize_filename(name: str | None) -> str:
     name = _UNSAFE.sub("", name).strip()            # drop control chars, separators
     return name[:255] or "blob"                     # cap length, never empty
 
-def put_file(request, parent_id, filename):
-    token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
-    if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-
+def put_file(request, parent_id, filename, token):
     raw = request._request
     hasher = hashlib.sha256()
     fs = Filesystem()
@@ -91,10 +90,7 @@ def put_file(request, parent_id, filename):
         return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
 
 
-def put_dir(request, parent_id, name):
-    token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
-    if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-
+def put_dir(request, parent_id, name, token):
     fs = Filesystem()
     ratelimit = Cache()
 
@@ -113,10 +109,73 @@ def put_dir(request, parent_id, name):
 
     if query == False:
         if fs.fs_collection.exists({"parent_id": parent_id, "name": name}):
-            return Response({"status": "OK"}, code.SUCCESS, headers=ratelimit.build_headers(rate_query))
+            return Response({"status": "Conflict"}, code.CONFLICT, headers=ratelimit.build_headers(rate_query))
         return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=ratelimit.build_headers(rate_query))
 
     return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
+
+def put_symlink(request, parent_id, name, token):
+    fs = Filesystem()
+    ratelimit = Cache()
+
+    try:
+        target = json.loads(request.body).get("target", None)
+    except json.JSONDecodeError:
+        return Response({"status": "Bad Request"}, code.MALFORMED)
+
+    if target is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+
+    rate_query = ratelimit.validate_request(token, ratelimit.per_symlink_cost)
+
+    if not rate_query.allowed:
+        return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
+
+    query = fs.sign_new_symlink(Symlink(
+        node_type=INodeType.SYMLINK,
+        parent_id=parent_id,
+        name=name,
+        permissions=Permissions(owner=token.token),
+        created_at=datetime.datetime.now().timestamp(),
+        target=target
+    ))
+
+    if query == False:
+        if fs.fs_collection.exists({"parent_id": parent_id, "name": name}):
+            return Response({"status": "Conflict"}, code.CONFLICT, headers=ratelimit.build_headers(rate_query))
+        return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=ratelimit.build_headers(rate_query))
+    
+    return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
+
+
+def del_file(request, file: File, token: APIToken):
+    fs = Filesystem()
+    query = fs.fs_collection.delete_one({"_id": file._id})
+    if not query: return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+
+    if fs.fs_collection.count_documents({"hashed": file.hashed}) == 0: fs.delete_from_node(file)
+
+    return Response({"status": "OK"}, code.SUCCESS)
+
+def del_symlink(request, symlink: Symlink, token: APIToken):
+    fs = Filesystem()
+    query = fs.fs_collection.delete_one({"_id": symlink._id})
+    return Response({"status": "OK"}, code.SUCCESS) if query else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+
+def del_directory(request, directory: Directory, token: APIToken):
+    fs = Filesystem()
+
+    dir_children = fs.fs_collection.find({"parent_id": directory._id})
+
+    for child in dir_children:
+        match child["node_type"]:
+            case INodeType.DIR:
+                del_directory(request, Directory().from_dict(child), token)
+            case INodeType.FILE:
+                del_file(request, File().from_dict(child), token)
+            case INodeType.SYMLINK:
+                del_symlink(request, Symlink().from_dict(child), token)
+
+    return Response({"status": "OK"}, code.SUCCESS) if fs.fs_collection.delete_one({"_id": directory._id}) else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
 
 
 class TraverseView(APIView):
@@ -142,11 +201,13 @@ class TraverseView(APIView):
 
         match edn_mode_header:
             case None:
-                return put_file(request, item_parent_id, item_name)
+                return put_file(request, item_parent_id, item_name, token)
             case "file":
-                return put_file(request, item_parent_id, item_name)
+                return put_file(request, item_parent_id, item_name, token)
             case "directory":
-                return put_dir(request, item_parent_id, item_name)
+                return put_dir(request, item_parent_id, item_name, token)
+            case "symlink":
+                return put_symlink(request, item_parent_id, item_name, token)
             
         return Response({"status": "Bad X-EDN-Mode Header"}, code.MALFORMED)
 
@@ -164,7 +225,7 @@ class TraverseView(APIView):
         fs = Filesystem()
 
         if not subpath:
-            children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": None})]
+            children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": None}, {"hosted_node_address": 0})]
             return Response(children, code.SUCCESS)
 
         if len(subpath) > 1:
@@ -179,7 +240,7 @@ class TraverseView(APIView):
         match item["node_type"]:
             case INodeType.DIR:
                 directory = Directory().from_dict(item)
-                children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": directory._id})]
+                children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": directory._id}, {"hosted_node_address": 0})]
                 return Response(children, code.SUCCESS)
             case INodeType.FILE:
                 file = File().from_dict(item)
@@ -219,5 +280,87 @@ class TraverseView(APIView):
                     if h in upstream.headers:
                         resp[h] = upstream.headers[h]
                 return resp
+            case INodeType.SYMLINK:
+                symlink = Symlink().from_dict(item)
+                if symlink.target is None: return Response({"status": "Bad Symlink Target"}, code.MALFORMED)
+                return self.get(request, subpath=symlink.target)
+
+        return Response({"status": "Bad Request"}, code.MALFORMED)
+
+    def head(self, request, subpath="/"):
+        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
+        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
+        subpath = [item for item in subpath if item != '']
+        
+        item_parent_id  = None
+        item_name       = sanitize_filename(subpath[-1] if subpath else "")
+        item_path       = subpath[:-1]
+        item_path       = [sanitize_filename(dir) for dir in item_path]
+
+        fs = Filesystem()
+
+        if not subpath:
+            return Response({"status": "Forbidden"}, code.FORBIDDEN)
+
+        if len(subpath) > 1:
+            # item has a parent...
+            traversed_list = fs.traverse_full_path(item_path)
+            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            item_parent_id = traversed_list[-1:][0]
+
+        item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
+        if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+        headers = {}
+        match item["node_type"]:
+            case INodeType.DIR:
+                item = Directory().from_dict(item)
+                headers["X-EDN-Mode"] = "directory"
+            case INodeType.FILE:
+                item = File().from_dict(item)
+                headers["X-EDN-Mode"] = "file"
+                headers["Content-Size"] = item.size
+                headers["X-Content-Type"] = item.content_type
+            case INodeType.SYMLINK:
+                item = Symlink().from_dict(item)
+                headers["X-EDN-Mode"] = "symlink"
+                headers["X-EDN-SymlinkTarget"] = item.target
+
+        return Response(status=code.SUCCESS, headers=headers)
+
+    def delete(self, request, subpath="/"):
+        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
+        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
+        subpath = [item for item in subpath if item != '']
+        
+        item_parent_id  = None
+        item_name       = sanitize_filename(subpath[-1] if subpath else "")
+        item_path       = subpath[:-1]
+        item_path       = [sanitize_filename(dir) for dir in item_path]
+
+        fs = Filesystem()
+
+        if not subpath:
+            return Response({"status": "Forbidden"}, code.FORBIDDEN)
+
+        if len(subpath) > 1:
+            # item has a parent...
+            traversed_list = fs.traverse_full_path(item_path)
+            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            item_parent_id = traversed_list[-1:][0]
+
+        item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name})
+        if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+        match item["node_type"]:
+            case INodeType.DIR:
+                item = Directory().from_dict(item)
+                return del_directory(request, item, token)
+            case INodeType.FILE:
+                item = File().from_dict(item)
+                return del_file(request, item, token)
+            case INodeType.SYMLINK:
+                item = Symlink().from_dict(item)
+                return del_symlink(request, item, token)
 
         return Response({"status": "Bad Request"}, code.MALFORMED)
