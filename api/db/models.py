@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, List
 from enum import Enum
 
 import attrs, requests
@@ -194,10 +194,12 @@ class INode():
 
     permissions: Permissions = attrs.field(factory=Permissions, converter=_as_Ownership)
 
+    _drop_if_none = ("_id", "parent_id")
     def to_dict(self) -> dict[str, Any]:
         data = attrs.asdict(self, recurse=True)
-        if data.get("_id") is None:
-            data.pop("_id", None)
+        for key in self._drop_if_none:
+            if data.get(key) is None:
+                data.pop(key, None)
         return data
 
     @classmethod
@@ -245,3 +247,8 @@ class Directory(INode):
 class Symlink(INode):
     target: Optional[str] = None
     created_at: Optional[float] = None 
+
+@attrs.define(kw_only=True)
+class TreeNode:
+    iNode: INode
+    children: Optional[List[TreeNode]] = None

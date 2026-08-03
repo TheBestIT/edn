@@ -8,7 +8,7 @@ from pymongo.cursor import Cursor
 from typing import Any, List
 import json, os
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import Model, INode
+from api.db.models import Model, INode, INodeType, File, Directory, Symlink
 
 class Collection:
     def __init__(self, collection: MongoCollection) -> None:
@@ -24,6 +24,18 @@ class Collection:
         document._id = result.inserted_id
         self.logger.log(f"insert_one called on collection with data: {document.to_dict()}. {result.acknowledged=}; {result.inserted_id=}")
         return result
+
+    def insert_one_unknown(self, document: dict) -> InsertOneResult | None:
+        node_type = document.get("node_type", None)
+        if node_type is None: return None
+        match node_type:
+            case INodeType.FILE.value:
+                return self.insert_one(File().from_dict(document))
+            case INodeType.DIR.value:
+                return self.insert_one(Directory().from_dict(document))
+            case INodeType.SYMLINK.value:
+                return self.insert_one(Symlink().from_dict(document))
+        return None
 
     def bulk_write(self, operations: List[Any]) -> BulkWriteResult:
         result = self.collection.bulk_write(operations)
@@ -53,6 +65,16 @@ class Collection:
         query = self.collection.count_documents(filter)
         self.logger.log(f"count_documents called on collection with {filter=}. count={query}")
         return query
+
+    def update_one(self, filter: dict, update: dict) -> bool | None:
+        try:
+            query = self.collection.update_one(filter, update)
+        except DuplicateKeyError:
+            self.logger.log(f"update_one called with duplicate {update=}")
+            return None
+        
+        self.logger.log(f"update_one called on collection with {filter=}; {update=}. {query.acknowledged=}")
+        return True if query.acknowledged else False
 
     def exists(self, filter: dict):
         return False if self.find_one(filter) is None else True

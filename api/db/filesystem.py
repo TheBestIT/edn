@@ -1,11 +1,11 @@
 from typing_extensions import Self
 from pymongo import ReplaceOne
 from bson import ObjectId
-import requests
+import requests, datetime
 
 from api.db.database import Database
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType, Symlink
+from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType, Symlink, TreeNode
 
 from typing import List, Optional
 
@@ -134,3 +134,91 @@ class Filesystem:
             last_dir = query
             
         return traversed_list
+
+    def index_dir(self, directory: Directory, strip_oids: bool = False) -> TreeNode:
+        children = self.fs_collection.find({"parent_id": directory._id})
+        if strip_oids:
+            directory._id = None
+            directory.parent_id = None
+        node: TreeNode = TreeNode(iNode=directory)
+        node.children = []
+
+        for child in children:
+            match child["node_type"]:
+                case INodeType.FILE.value:
+                    file = File().from_dict(child)
+                    if strip_oids:
+                        file._id = None
+                        file.parent_id = None
+                    node.children.append(TreeNode(iNode=file))
+                case INodeType.SYMLINK.value:
+                    symlink = Symlink().from_dict(child)
+                    if strip_oids:
+                        symlink._id = None
+                        symlink.parent_id = None
+                    node.children.append(TreeNode(iNode=symlink))
+                case INodeType.DIR.value:
+                    dir = Directory().from_dict(child)
+                    node.children.append(self.index_dir(dir, strip_oids))
+
+        return node
+
+    def repopulate_parent_ids_from_treenode(self, treenode: TreeNode):
+        node_master_dir: Directory = Directory().from_dict(treenode.iNode.to_dict())
+        if treenode.children is None: return
+        for child in treenode.children:
+            match child.iNode.node_type:
+                case INodeType.FILE.value:
+                    file = File().from_dict(child.iNode.to_dict())
+                    file.parent_id = node_master_dir._id
+                    file.created_at = datetime.datetime.now().timestamp()
+                    query = self.fs_collection.insert_one(file)
+                    if query is None: return
+                    if not query.acknowledged: return
+                    file._id = query.inserted_id
+                    child.iNode = file
+                case INodeType.SYMLINK.value:
+                    symlink = Symlink().from_dict(child.iNode.to_dict())
+                    symlink.parent_id = node_master_dir._id
+                    symlink.created_at = datetime.datetime.now().timestamp()
+                    query = self.fs_collection.insert_one(symlink)
+                    if query is None: return
+                    if not query.acknowledged: return
+                    symlink._id = query.inserted_id
+                    child.iNode = symlink
+                case INodeType.DIR.value:
+                    dir = Directory().from_dict(child.iNode.to_dict())
+                    dir.parent_id = node_master_dir._id
+                    dir.created_at = datetime.datetime.now().timestamp()
+                    query = self.fs_collection.insert_one(dir)
+                    if query is None: return
+                    if not query.acknowledged: return
+                    dir._id = query.inserted_id
+                    child.iNode = dir
+                    self.repopulate_parent_ids_from_treenode(child)
+
+
+    def copy_item(self, item: dict, target_oid: ObjectId | None) -> bool | None:
+        if item["node_type"] != INodeType.DIR.value:
+            item["parent_id"] = target_oid
+            item["created_at"] = datetime.datetime.now().timestamp()
+            del item["_id"]
+            insert_query = self.fs_collection.insert_one_unknown(item)
+            return None if insert_query is None else insert_query.acknowledged
+
+        # we need to rebuild the full tree of the directory and copy it over
+        target_directory = Directory().from_dict(item)
+        target_directory.created_at = datetime.datetime.now().timestamp()
+        dir_tree = self.index_dir(target_directory, True)
+        self.logger.log(f"self.index_dir(target_directory, True) -> {dir_tree=}")
+
+        query = self.fs_collection.insert_one(dir_tree.iNode)
+        if query is None: return
+        if not query.acknowledged: return
+        dir_tree.iNode._id = query.inserted_id
+        dir_tree.iNode.parent_id = target_oid
+        self.repopulate_parent_ids_from_treenode(dir_tree)
+        self.logger.log(f"self.repopulate_parent_ids_from_treenode(dir_tree) -> {dir_tree=}")
+
+        return True
+

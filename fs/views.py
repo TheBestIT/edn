@@ -10,6 +10,7 @@ from api.misc.logger import Logger, LoggerLevel
 import tempfile, hashlib, requests, re, datetime
 from django.http import StreamingHttpResponse
 import json
+from bson import ObjectId
 from typing import List
 
 _UNSAFE = re.compile(r"[^\w.\- ]")
@@ -177,9 +178,8 @@ def del_directory(request, directory: Directory, token: APIToken):
 
     return Response({"status": "OK"}, code.SUCCESS) if fs.fs_collection.delete_one({"_id": directory._id}) else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
 
-
 class TraverseView(APIView):
-
+    # TODO: make common function for all the token verification/path handling
     def put(self, request, subpath="/"):
         token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
         if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
@@ -364,3 +364,85 @@ class TraverseView(APIView):
                 return del_symlink(request, item, token)
 
         return Response({"status": "Bad Request"}, code.MALFORMED)
+
+    def patch(self, request, subpath="/"):
+        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
+        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
+        subpath = [item for item in subpath if item != '']
+        
+        item_parent_id  = None
+        item_name       = sanitize_filename(subpath[-1] if subpath else "")
+        item_path       = subpath[:-1]
+        item_path       = [sanitize_filename(dir) for dir in item_path]
+
+        fs = Filesystem()
+
+        if not subpath:
+            return Response({"status": "Forbidden"}, code.FORBIDDEN)
+
+        if len(subpath) > 1:
+            # item has a parent...
+            traversed_list = fs.traverse_full_path(item_path)
+            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            item_parent_id = traversed_list[-1:][0]
+
+        target_item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
+        if target_item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+
+        operation = request.headers.get("X-EDN-Patch", None)
+        if operation is None: return Response({"status": "Missing X-EDN-Patch Header"}, code.MALFORMED)
+
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return Response({"status": "Bad Request"}, code.MALFORMED)
+
+        path = data.get("path", None)
+        name = data.get("name", None)
+        target_dir_oid: Optional[ObjectId] = None
+
+        if path is not None:
+            path = path.split("/") if path[0] == '/' else str(f"/{path}").split("/")
+            path = [item for item in path if item != '']
+            
+            item_parent_id  = None
+            item_name       = sanitize_filename(path[-1] if path else "")
+            item_path       = path[:-1]
+            item_path       = [sanitize_filename(dir) for dir in item_path]
+
+            if len(path) > 1:
+                # item has a parent...
+                traversed_list = fs.traverse_full_path(item_path)
+                if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+                item_parent_id = traversed_list[-1:][0]
+
+                item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
+                if item is None: return Response({"status": "Target directory not found"}, code.NOT_FOUND)
+
+                if item["node_type"] != INodeType.DIR: return Response({"status": "Target is not a directory"}, code.MALFORMED)
+                target_dir_oid = item["_id"]
+
+        query: Optional[bool] = None
+        match operation:
+            case "move":
+                if path is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+                if target_item["_id"] in fs.traverse_full_path(path): return Response({"status": "Conflict"}, code.CONFLICT)
+                if target_item["parent_id"] == target_dir_oid: return Response({"status": "ok"}, code.SUCCESS)
+                query = fs.fs_collection.update_one({"_id": target_item["_id"]}, {"$set": {"parent_id": target_dir_oid}})
+            case "rename":
+                if name is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+                name = sanitize_filename(name)
+                update_query = fs.fs_collection.update_one({"_id": target_item["_id"]}, {"$set": {"name": name}})
+                if update_query is None: return Response({"status": "Conflict"}, code.CONFLICT)
+                query = update_query
+            case "copy":
+                if path is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+                if target_item["parent_id"] == target_dir_oid: return Response({"status": "Conflict"}, code.CONFLICT)
+                copy_query = fs.copy_item(target_item, target_dir_oid)
+                if copy_query is None: return Response({"status": "ok"}, code.SUCCESS)
+                query = copy_query
+
+        if query is None: return Response({"status": "Invalid X-EDN-Patch Header"}, code.MALFORMED)
+
+        return Response({"status": "ok"}, code.SUCCESS) if query else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)

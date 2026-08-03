@@ -57,7 +57,7 @@ path `/youtube/<id>`. Each directory has its own permissions.
 - [X] Write the engine that finds the node for a path. The engine uses one
   namespace for the physical nodes and the virtual nodes.
 - [X] Add the metadata: size, MIME type, times, checksums and other attributes.
-- [ ] Write the rules to move, copy, rename and ~~delete~~ a node.
+- [X] Write the rules to move, copy, rename and delete a node.
 - [X] Write API calls to show, to find and to go through the nodes.
 
 ### Phase 4 — Permissions
