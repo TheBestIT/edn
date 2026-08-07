@@ -1,9 +1,10 @@
-from typing import Any, Optional
+from typing import Optional
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from api.db.filesystem import Filesystem
-from api.db.models import APIToken, StorageNode, File, INodeType, Permissions, Directory, RateLimitResponse, Symlink, _jsonable
+from api.db.models import User, StorageNode, File, INodeType, Permissions, Directory, PermissionFlags, RateLimitResponse, Symlink, _jsonable
 from api.db.auth import Auth
+from api.db.userinteractions import *
 from api.misc.responses import ResponseCodes as code
 from api.db.cache import Cache
 from api.misc.logger import Logger, LoggerLevel
@@ -22,12 +23,20 @@ def sanitize_filename(name: str | None) -> str:
     name = _UNSAFE.sub("", name).strip()            # drop control chars, separators
     return name[:255] or "blob"                     # cap length, never empty
 
-def put_file(request, parent_id, filename, token):
+def put_file(request, parent_id, filename, user: User):
     raw = request._request
     hasher = hashlib.sha256()
     fs = Filesystem()
     ratelimit = Cache()
     total_bytes = 0
+
+    if user._id is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    if user.groups is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+
+    permissions = Permissions(
+        owner=(user._id, PermissionFlags.READ | PermissionFlags.WRITE),
+        group=(user.groups[0], PermissionFlags.READ | PermissionFlags.WRITE)
+    )
 
     with tempfile.SpooledTemporaryFile(max_size=fs.max_blob_size) as spool:
         while True:
@@ -52,7 +61,7 @@ def put_file(request, parent_id, filename, token):
             existing_entry = File().from_dict(existing_entry)
             if existing_entry.parent_id == parent_id and existing_entry.name == filename: return Response({"status": "OK"}, code.SUCCESS)
             node_address = existing_entry.hosted_node_address
-            rate_query = ratelimit.validate_request(token, ratelimit.per_existing_cost)
+            rate_query = ratelimit.validate_request(user, ratelimit.per_existing_cost)
         else:
             # Ask fs for suitable node
             node: StorageNode | None = fs.get_first_suitable_node(total_bytes)
@@ -60,7 +69,7 @@ def put_file(request, parent_id, filename, token):
                 return Response({"status": "No Available Node found"}, code.INSUFFICIENT_STORAGE)
 
             # Check if Rate-Limit allows operation
-            rate_query = ratelimit.validate_request(token, total_bytes*ratelimit.per_byte_cost)
+            rate_query = ratelimit.validate_request(user, total_bytes*ratelimit.per_byte_cost)
             if not rate_query.allowed:
                 return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
 
@@ -82,7 +91,7 @@ def put_file(request, parent_id, filename, token):
             size=total_bytes,
             hosted_node_address=node_address,
             created_at=datetime.datetime.now().timestamp(),
-            permissions=Permissions(owner=token.token)
+            permissions=permissions
         ))
 
         if db_query == False:
@@ -91,11 +100,19 @@ def put_file(request, parent_id, filename, token):
         return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
 
 
-def put_dir(request, parent_id, name, token):
+def put_dir(request, parent_id, name, user: User):
     fs = Filesystem()
     ratelimit = Cache()
 
-    rate_query = ratelimit.validate_request(token, ratelimit.per_dir_cost)
+    if user._id is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    if user.groups is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+
+    permissions = Permissions(
+        owner=(user._id, PermissionFlags.READ | PermissionFlags.WRITE),
+        group=(user.groups[0], PermissionFlags.READ | PermissionFlags.WRITE)
+    )
+
+    rate_query = ratelimit.validate_request(user, ratelimit.per_dir_cost)
 
     if not rate_query.allowed:
         return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
@@ -104,7 +121,7 @@ def put_dir(request, parent_id, name, token):
         node_type=INodeType.DIR,
         parent_id=parent_id,
         name=name,
-        permissions=Permissions(owner=token.token),
+        permissions=permissions,
         created_at=datetime.datetime.now().timestamp()
     ))
 
@@ -115,9 +132,17 @@ def put_dir(request, parent_id, name, token):
 
     return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
 
-def put_symlink(request, parent_id, name, token):
+def put_symlink(request, parent_id, name, user: User):
     fs = Filesystem()
     ratelimit = Cache()
+
+    if user._id is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    if user.groups is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+
+    permissions = Permissions(
+        owner=(user._id, PermissionFlags.READ | PermissionFlags.WRITE),
+        group=(user.groups[0], PermissionFlags.READ | PermissionFlags.WRITE)
+    )
 
     try:
         target = json.loads(request.body).get("target", None)
@@ -126,7 +151,7 @@ def put_symlink(request, parent_id, name, token):
 
     if target is None: return Response({"status": "Bad Request"}, code.MALFORMED)
 
-    rate_query = ratelimit.validate_request(token, ratelimit.per_symlink_cost)
+    rate_query = ratelimit.validate_request(user, ratelimit.per_symlink_cost)
 
     if not rate_query.allowed:
         return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
@@ -135,7 +160,7 @@ def put_symlink(request, parent_id, name, token):
         node_type=INodeType.SYMLINK,
         parent_id=parent_id,
         name=name,
-        permissions=Permissions(owner=token.token),
+        permissions=permissions,
         created_at=datetime.datetime.now().timestamp(),
         target=target
     ))
@@ -148,7 +173,7 @@ def put_symlink(request, parent_id, name, token):
     return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
 
 
-def del_file(request, file: File, token: APIToken):
+def del_file(request, file: File, user: User):
     fs = Filesystem()
     query = fs.fs_collection.delete_one({"_id": file._id})
     if not query: return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
@@ -157,12 +182,12 @@ def del_file(request, file: File, token: APIToken):
 
     return Response({"status": "OK"}, code.SUCCESS)
 
-def del_symlink(request, symlink: Symlink, token: APIToken):
+def del_symlink(request, symlink: Symlink, user: User):
     fs = Filesystem()
     query = fs.fs_collection.delete_one({"_id": symlink._id})
     return Response({"status": "OK"}, code.SUCCESS) if query else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
 
-def del_directory(request, directory: Directory, token: APIToken):
+def del_directory(request, directory: Directory, user: User):
     fs = Filesystem()
 
     dir_children = fs.fs_collection.find({"parent_id": directory._id})
@@ -170,19 +195,19 @@ def del_directory(request, directory: Directory, token: APIToken):
     for child in dir_children:
         match child["node_type"]:
             case INodeType.DIR:
-                del_directory(request, Directory().from_dict(child), token)
+                del_directory(request, Directory().from_dict(child), user)
             case INodeType.FILE:
-                del_file(request, File().from_dict(child), token)
+                del_file(request, File().from_dict(child), user)
             case INodeType.SYMLINK:
-                del_symlink(request, Symlink().from_dict(child), token)
+                del_symlink(request, Symlink().from_dict(child), user)
 
     return Response({"status": "OK"}, code.SUCCESS) if fs.fs_collection.delete_one({"_id": directory._id}) else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
 
 class TraverseView(APIView):
     # TODO: make common function for all the token verification/path handling
-    def put(self, request, subpath="/"):
-        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
-        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    def put(self, request, subpath="/"): # PermissionFlags.WRITE
+        user: User | None = Auth().get_User_from_META_headers(request.META)
+        if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
 
         edn_mode_header = request.headers.get("X-EDN-Mode", None)
         subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
@@ -195,25 +220,34 @@ class TraverseView(APIView):
 
         if len(subpath) > 1:
             # item has a parent...
-            traversed_list = Filesystem().traverse_full_path(item_path)
-            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
+            traversed_list = UserInteractions(user).traverseFullPath(item_path)
+            if isinstance(traversed_list, InteractionResponse):
+                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
             item_parent_id = traversed_list[-1:][0]
+
+        fs = Filesystem()
+        
+        parent_object = fs.fs_collection.find_one({"_id": item_parent_id})
+        if parent_object is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+        flag_query = UserInteractions(user).checkUnknownFlag(parent_object, PermissionFlags.WRITE)
+        if not flag_query: return Response({"status": f"Permission Denied: {parent_object['name']}"}, code.FORBIDDEN)
 
         match edn_mode_header:
             case None:
-                return put_file(request, item_parent_id, item_name, token)
+                return put_file(request, item_parent_id, item_name, user)
             case "file":
-                return put_file(request, item_parent_id, item_name, token)
+                return put_file(request, item_parent_id, item_name, user)
             case "directory":
-                return put_dir(request, item_parent_id, item_name, token)
+                return put_dir(request, item_parent_id, item_name, user)
             case "symlink":
-                return put_symlink(request, item_parent_id, item_name, token)
+                return put_symlink(request, item_parent_id, item_name, user)
             
         return Response({"status": "Bad X-EDN-Mode Header"}, code.MALFORMED)
 
-    def get(self, request, subpath="/"):
-        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
-        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    def get(self, request, subpath="/"): # PermissionFlags.READ
+        user: User | None = Auth().get_User_from_META_headers(request.META)
+        if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
         subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
         subpath = [item for item in subpath if item != '']
         
@@ -225,22 +259,27 @@ class TraverseView(APIView):
         fs = Filesystem()
 
         if not subpath:
-            children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": None}, {"hosted_node_address": 0})]
+            children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": None, "_id": { "$ne": None } }, {"hosted_node_address": 0})]
             return Response(children, code.SUCCESS)
 
         if len(subpath) > 1:
             # item has a parent...
-            traversed_list = fs.traverse_full_path(item_path)
-            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            traversed_list = UserInteractions(user).traverseFullPath(item_path)
+            if isinstance(traversed_list, InteractionResponse):
+                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
             item_parent_id = traversed_list[-1:][0]
 
         item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name})
         if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
 
+        flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.READ)
+        if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
+
         match item["node_type"]:
             case INodeType.DIR:
                 directory = Directory().from_dict(item)
-                children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": directory._id}, {"hosted_node_address": 0})]
+                children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": directory._id, "_id": { "$ne": None } }, {"hosted_node_address": 0})]
+                
                 return Response(children, code.SUCCESS)
             case INodeType.FILE:
                 file = File().from_dict(item)
@@ -287,9 +326,9 @@ class TraverseView(APIView):
 
         return Response({"status": "Bad Request"}, code.MALFORMED)
 
-    def head(self, request, subpath="/"):
-        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
-        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    def head(self, request, subpath="/"): # PermissionFlags.READ
+        user: User | None = Auth().get_User_from_META_headers(request.META)
+        if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
         subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
         subpath = [item for item in subpath if item != '']
         
@@ -305,12 +344,18 @@ class TraverseView(APIView):
 
         if len(subpath) > 1:
             # item has a parent...
-            traversed_list = fs.traverse_full_path(item_path)
-            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
+            traversed_list = UserInteractions(user).traverseFullPath(item_path)
+            if isinstance(traversed_list, InteractionResponse):
+                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
             item_parent_id = traversed_list[-1:][0]
 
         item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
         if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+
+        flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.READ)
+        if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
+
         headers = {}
         match item["node_type"]:
             case INodeType.DIR:
@@ -328,9 +373,9 @@ class TraverseView(APIView):
 
         return Response(status=code.SUCCESS, headers=headers)
 
-    def delete(self, request, subpath="/"):
-        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
-        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    def delete(self, request, subpath="/"): # PermissionFlags.WRITE
+        user: User | None = Auth().get_User_from_META_headers(request.META)
+        if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
         subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
         subpath = [item for item in subpath if item != '']
         
@@ -346,28 +391,34 @@ class TraverseView(APIView):
 
         if len(subpath) > 1:
             # item has a parent...
-            traversed_list = fs.traverse_full_path(item_path)
-            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
+            traversed_list = UserInteractions(user).traverseFullPath(item_path)
+            if isinstance(traversed_list, InteractionResponse):
+                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
             item_parent_id = traversed_list[-1:][0]
 
         item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name})
         if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+
+        flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.WRITE)
+        if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
+
         match item["node_type"]:
             case INodeType.DIR:
                 item = Directory().from_dict(item)
-                return del_directory(request, item, token)
+                return del_directory(request, item, user)
             case INodeType.FILE:
                 item = File().from_dict(item)
-                return del_file(request, item, token)
+                return del_file(request, item, user)
             case INodeType.SYMLINK:
                 item = Symlink().from_dict(item)
-                return del_symlink(request, item, token)
+                return del_symlink(request, item, user)
 
         return Response({"status": "Bad Request"}, code.MALFORMED)
 
-    def patch(self, request, subpath="/"):
-        token: APIToken | None = Auth().get_APIToken_from_META_headers(request.META)
-        if token is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+    def patch(self, request, subpath="/"): # PermissionFlags.WRITE
+        user: User | None = Auth().get_User_from_META_headers(request.META)
+        if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
         subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
         subpath = [item for item in subpath if item != '']
         
@@ -383,12 +434,16 @@ class TraverseView(APIView):
 
         if len(subpath) > 1:
             # item has a parent...
-            traversed_list = fs.traverse_full_path(item_path)
-            if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
+            traversed_list = UserInteractions(user).traverseFullPath(item_path)
+            if isinstance(traversed_list, InteractionResponse):
+                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
             item_parent_id = traversed_list[-1:][0]
 
         target_item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
         if target_item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+        flag_query = UserInteractions(user).checkUnknownFlag(target_item, PermissionFlags.READ)
+        if not flag_query: return Response({"status": f"Can't open file '{target_item['name']}': Permission Denied"}, code.FORBIDDEN)
 
         operation = request.headers.get("X-EDN-Patch", None)
         if operation is None: return Response({"status": "Missing X-EDN-Patch Header"}, code.MALFORMED)
@@ -413,8 +468,10 @@ class TraverseView(APIView):
 
             if len(path) > 1:
                 # item has a parent...
-                traversed_list = fs.traverse_full_path(item_path)
-                if traversed_list is None: return Response({"status": "Bad Path"}, code.MALFORMED)
+                # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
+                traversed_list = UserInteractions(user).traverseFullPath(item_path)
+                if isinstance(traversed_list, InteractionResponse):
+                    return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
                 item_parent_id = traversed_list[-1:][0]
 
                 item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
@@ -422,6 +479,12 @@ class TraverseView(APIView):
 
                 if item["node_type"] != INodeType.DIR: return Response({"status": "Target is not a directory"}, code.MALFORMED)
                 target_dir_oid = item["_id"]
+
+        target_dir = fs.fs_collection.find_one({"_id": target_dir_oid})
+        if target_dir is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+        readflag_query = UserInteractions(user).checkUnknownFlag(target_dir, PermissionFlags.READ)
+        writeflag_query = UserInteractions(user).checkUnknownFlag(target_dir, PermissionFlags.WRITE)
+        if not readflag_query or not writeflag_query: return Response({"status": f"Permission Denied: {target_dir['name']}"}, code.FORBIDDEN)
 
         query: Optional[bool] = None
         match operation:
@@ -433,6 +496,7 @@ class TraverseView(APIView):
             case "rename":
                 if name is None: return Response({"status": "Bad Request"}, code.MALFORMED)
                 name = sanitize_filename(name)
+                if not UserInteractions(user).checkUnknownFlag(target_item, PermissionFlags.WRITE): return Response({"status": f"Permission Denied: {target_item['name']}"}, code.FORBIDDEN)
                 update_query = fs.fs_collection.update_one({"_id": target_item["_id"]}, {"$set": {"name": name}})
                 if update_query is None: return Response({"status": "Conflict"}, code.CONFLICT)
                 query = update_query

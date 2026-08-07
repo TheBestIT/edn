@@ -1,11 +1,12 @@
 from typing_extensions import Self
 from pymongo import ReplaceOne
 from bson import ObjectId
-import requests, datetime
+import requests, datetime, attrs
 
 from api.db.database import Database
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType, Symlink, TreeNode
+from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType, Symlink, TreeNode, Permissions, PermissionFlags, User
+from api.db.auth import Auth
 
 from typing import List, Optional
 
@@ -35,6 +36,27 @@ class Filesystem:
         cursor = self.nodes_collection.find({}) # Get all nodes
         for node in cursor:
             self.cached_nodes.append(StorageNode(address="").from_dict(node))
+
+        # sanity check
+        if self.fs_collection.count_documents({"_id": None}) == 0:
+            root_user: User = Auth().root
+            if root_user._id is None or root_user.groups is None: self.logger.fail("Unable to get root (uid=0) user from Auth module")
+            root_permissions = Permissions(
+                owner=(root_user._id, PermissionFlags.READ | PermissionFlags.WRITE),
+                group=(root_user.groups[0], PermissionFlags.READ | PermissionFlags.WRITE),
+                other=PermissionFlags.READ
+            )
+            root = Directory(
+                parent_id=None,
+                name="/",
+                permissions=root_permissions,
+                created_at=datetime.datetime.now().timestamp()
+            )
+
+            root_dict = attrs.asdict(root, recurse=True)
+            self.fs_collection.collection.insert_one(root_dict)
+            self.logger.log(f"Created '/' directory (_id=null)")
+
 
     def check_nodes(self):
         for node in self.cached_nodes: node.check_health()
@@ -118,7 +140,7 @@ class Filesystem:
         return True if query.status_code == 200 else False
     
     # Returns the traversed path in the order of the given path
-    def traverse_full_path(self, path: List[str]) -> List[ObjectId] | None:
+    def traverse_full_path(self, path: List[str]) -> List[Directory] | None:
         last_dir: Optional[Directory] = None
         traversed_list = []
         for dir in path:
@@ -126,11 +148,11 @@ class Filesystem:
                 query = self.get_child_dir_from_folder(None, dir)
                 if query is None: return None # broken tree chain
                 last_dir = query
-                traversed_list.append(query._id)
+                traversed_list.append(query)
                 continue
             query = last_dir.get_child_dir(dir)
             if query is None: return None
-            traversed_list.append(query._id)
+            traversed_list.append(query)
             last_dir = query
             
         return traversed_list
@@ -210,13 +232,13 @@ class Filesystem:
         target_directory = Directory().from_dict(item)
         target_directory.created_at = datetime.datetime.now().timestamp()
         dir_tree = self.index_dir(target_directory, True)
+        dir_tree.iNode.parent_id = target_oid
         self.logger.log(f"self.index_dir(target_directory, True) -> {dir_tree=}")
 
         query = self.fs_collection.insert_one(dir_tree.iNode)
         if query is None: return
         if not query.acknowledged: return
         dir_tree.iNode._id = query.inserted_id
-        dir_tree.iNode.parent_id = target_oid
         self.repopulate_parent_ids_from_treenode(dir_tree)
         self.logger.log(f"self.repopulate_parent_ids_from_treenode(dir_tree) -> {dir_tree=}")
 

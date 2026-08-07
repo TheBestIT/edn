@@ -5,7 +5,7 @@ import os
 import redis
 
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import APIToken, APIUsage, RateLimitResponse
+from api.db.models import User, APIUsage, RateLimitResponse
 
 # KEYS[1] should be the token
 # ARGV[1] should be the default bucket size
@@ -94,22 +94,22 @@ class Cache:
 
         self.check_rate = self.client.register_script(atomic)
 
-    def validate_request(self, token: APIToken, cost: float) -> RateLimitResponse:
+    def validate_request(self, user: User, cost: float) -> RateLimitResponse:
         allowed, tokens, retry_after = cast(
             "list[Any]",
             self.check_rate(
-                keys=[f"ratelimit:{token.token}"],
+                keys=[f"ratelimit:{user.token}"],
                 args=[
-                    token.usage.bucket_size,
+                    user.usage.bucket_size,
                     cost,
-                    token.usage.bucket_refill_rate,
-                    token.usage.bucket_expire_rate,
+                    user.usage.bucket_refill_rate,
+                    user.usage.bucket_expire_rate,
                 ],
             ),
         )
 
-        self.logger.log(f"({token.token}) {allowed=} ({cost=}, {tokens=}); retry after {float(retry_after):.2f}s")
-        return RateLimitResponse(allowed=allowed, tokens=float(tokens), retry_after=float(retry_after), usage_policy=token.usage)
+        self.logger.log(f"({user.token}) {allowed=} ({cost=}, {tokens=}); retry after {float(retry_after):.2f}s")
+        return RateLimitResponse(allowed=allowed, tokens=float(tokens), retry_after=float(retry_after), usage_policy=user.usage)
 
     def build_headers(self, rate_limit_query: RateLimitResponse) -> dict:
         headers = {

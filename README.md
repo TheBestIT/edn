@@ -62,7 +62,7 @@ path `/youtube/<id>`. Each directory has its own permissions.
 
 ### Phase 4 — Permissions
 
-- [ ] Write a permission model for each directory. Use owners, groups and
+- [X] Write a permission model for each directory. Use owners, groups and
   roles.
 - [ ] Let a directory get the permissions of its parent directory. Let an
   operator replace these permissions.

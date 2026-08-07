@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Mapping, Optional, List
+from typing import Any, Mapping, Optional, List, Generic, Tuple
+from typing_extensions import TypeVar
 from enum import Enum
 
 import attrs, requests
@@ -21,10 +22,11 @@ def _jsonable(value: Any) -> Any:
         return [_jsonable(v) for v in value]
     return value
 
+IdT = TypeVar("IdT", default=ObjectId)
 
 @attrs.define(kw_only=True)
-class Model:
-    _id: Optional[ObjectId] = None
+class Model(Generic[IdT]):
+    _id: Optional[IdT] = attrs.field(default=None, alias="_id")
 
     def to_dict(self) -> dict[str, Any]:
         data = attrs.asdict(self, recurse=True)
@@ -51,7 +53,7 @@ class Model:
     def to_public(self) -> dict[str, Any]:
         data = self.to_dict()
         oid = data.pop("_id", None)
-        public: dict[str, Any] = {"id": str(oid)} if oid is not None else {}
+        public: dict[str, Any] = {"id": (str(oid) if isinstance(oid, ObjectId) else oid)} if oid is not None else {}
         public.update({k: _jsonable(v) for k, v in data.items()})
         return public
 
@@ -85,10 +87,18 @@ class RateLimitResponse(Model):
 # API/Auth
 
 @attrs.define(kw_only=True)
-class APIToken(Model):
+class User(Model[int]): # _id is mapped to an int in this call
     token: str          = ""
+    name: str           = ""
     created_at: float   = 0.0
     usage: APIUsage     = attrs.field(factory=APIUsage, converter=_as_usage)
+    groups: List[int]   = []
+
+@attrs.define(kw_only=True)
+class Group(Model[int]): # _id is mapped to an int in this call
+    name: Optional[str] = None
+    created_at: Optional[float] = None
+    owner: Optional[int] = None
 
 # StorageNode
 
@@ -173,9 +183,43 @@ class INodeType(int, Enum):
     FILE = 1
     SYMLINK = 2
 
+class PermissionFlags(int, Enum):
+    READ = 0x10
+    WRITE = 0x20
+
 @attrs.define(kw_only=True)
 class Permissions:
-    owner: str | None = None 
+    owner: Optional[Tuple[int, int]] = None 
+    group: Optional[Tuple[int, int]] = None 
+    other: Optional[int] = 0 
+
+    def check_flag(self, flag: PermissionFlags, user: User) -> bool:
+        if user._id == 0 or any(gid == 0 for gid in user.groups): return True
+        if self.owner is None or self.group is None: return False
+
+        if self.owner[0] == user._id: return self.owner[1] & flag == flag
+        if any(gid == self.group[0] for gid in user.groups): return self.group[1] & flag == flag
+        
+        return False if self.other is None else self.other & flag == flag
+
+    def get_permission_string(self) -> str:
+        string = ""
+        if self.owner is not None:
+            string += 'r' if self.owner[1] & PermissionFlags.READ == PermissionFlags.READ else '-'
+            string += 'w' if self.owner[1] & PermissionFlags.WRITE == PermissionFlags.WRITE else '-'
+        else: string += '--'
+
+        if self.group is not None:
+            string += 'r' if self.group[1] & PermissionFlags.READ == PermissionFlags.READ else '-'
+            string += 'w' if self.group[1] & PermissionFlags.WRITE == PermissionFlags.WRITE else '-'
+        else: string += '--'
+
+        if self.other is not None:
+            string += 'r' if self.other & PermissionFlags.READ == PermissionFlags.READ else '-'
+            string += 'w' if self.other & PermissionFlags.WRITE == PermissionFlags.WRITE else '-'
+        else: string += '--'
+
+        return string
 
 def _as_Ownership(value: Any) -> Permissions:
     if isinstance(value, Permissions):

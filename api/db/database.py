@@ -5,7 +5,7 @@ from pymongo.collection import Collection as MongoCollection
 from pymongo.results import InsertOneResult, BulkWriteResult
 from pymongo.errors import DuplicateKeyError
 from pymongo.cursor import Cursor
-from typing import Any, List
+from typing import Any, List, Optional
 import json, os
 from api.misc.logger import Logger, LoggerLevel
 from api.db.models import Model, INode, INodeType, File, Directory, Symlink
@@ -15,7 +15,7 @@ class Collection:
         self.logger = Logger(f"database.collection.{collection.name}", LoggerLevel.VERBOSE)
         self.collection = collection
 
-    def insert_one(self, document: Model | INode) -> InsertOneResult | None:
+    def insert_one(self, document: Model[Any] | INode) -> InsertOneResult | None:
         try:
             result = self.collection.insert_one(document.to_dict())
         except DuplicateKeyError:
@@ -47,7 +47,7 @@ class Collection:
         self.logger.log(f"find_one called on collection with data: {filter=}; {projection=}. matched={result is not None}")
         return result
 
-    def find(self, filter: dict, projection: dict | None = None):
+    def find(self, filter: Optional[dict] = None, projection: Optional[dict] = None):
         cursor = self.collection.find(filter, projection or None)
         self.logger.log(f"find called on collection with data: {filter=}; {projection=}.")
         return cursor
