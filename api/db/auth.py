@@ -41,6 +41,17 @@ class Auth:
         if id >= 0 and id < 1000: id = 999
         return id+1
 
+    def _get_next_available_sid(self, target_collection: Collection) -> int | None:
+        cursor = target_collection.find({"_id": {"$lt": 1000}}).sort({"_id": -1}).limit(1)
+        id = None
+        for result in cursor:
+            result = User().from_dict(result)
+            id = result._id
+
+        if id is None: return None
+        if id > 999: return None
+        return id+1
+
     def _get_next_available_uid(self) -> int:
         return self._get_next_available_id(self.users_collection)
 
@@ -88,7 +99,14 @@ class Auth:
             return False
         return True
 
-    def generate_new_user(self, name: str, force_id: Optional[int] = None) -> User | None:
+    def get_service_user(self, handler_name: str, ifexist: bool = False) -> User | None:
+        query = self.users_collection.find_one({"name": f"plugin:{handler_name}"})
+        if query is not None: return User().from_dict(query)
+        if ifexist: return None
+        next_available_sid = self._get_next_available_sid(self.users_collection)
+        return self.generate_new_user(f"plugin:{handler_name}", next_available_sid, True)
+
+    def generate_new_user(self, name: str, force_id: Optional[int] = None, nologin: bool = False) -> User | None:
         if force_id is None: next_available_uid = self._get_next_available_uid()
         else:
             next_available_uid = force_id
@@ -107,7 +125,8 @@ class Auth:
             token=str(uuid.uuid4()),
             name=name,
             groups=[user_group._id],
-            created_at=datetime.datetime.now().timestamp()
+            created_at=datetime.datetime.now().timestamp(),
+            nologin=nologin
         )
 
         self.logger.log(user.to_dict())
@@ -147,4 +166,6 @@ class Auth:
         if authorization_header is None: return None
         token = authorization_header.replace("Bearer ", "")
         query = self.get_User_from_token_string(token)
+        if isinstance(query, User):
+            if query.nologin: return None
         return query

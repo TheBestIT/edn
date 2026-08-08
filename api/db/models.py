@@ -93,6 +93,7 @@ class User(Model[int]): # _id is mapped to an int in this call
     created_at: float   = 0.0
     usage: APIUsage     = attrs.field(factory=APIUsage, converter=_as_usage)
     groups: List[int]   = []
+    nologin: bool       = False
 
 @attrs.define(kw_only=True)
 class Group(Model[int]): # _id is mapped to an int in this call
@@ -182,6 +183,7 @@ class INodeType(int, Enum):
     DIR = 0
     FILE = 1
     SYMLINK = 2
+    VIRTUAL = 3
 
 class PermissionFlags(int, Enum):
     READ = 0x10
@@ -199,7 +201,7 @@ class Permissions:
 
         if self.owner[0] == user._id: return self.owner[1] & flag == flag
         if any(gid == self.group[0] for gid in user.groups): return self.group[1] & flag == flag
-        
+
         return False if self.other is None else self.other & flag == flag
 
     def get_permission_string(self) -> str:
@@ -270,6 +272,13 @@ class INode():
         return public
 
 @attrs.define(kw_only=True)
+class Virtual(INode):
+    handler: Optional[str] = None
+    config: dict = attrs.field(factory=dict) # plugin-controlled configs
+    cost: int = 10
+    created_at: Optional[float] = None
+
+@attrs.define(kw_only=True)
 class File(INode):
     hashed: Optional[str] = None
     content_type: Optional[str] = None
@@ -282,10 +291,15 @@ class Directory(INode):
     created_at: Optional[float] = None
 
     def get_child_dir(self, child_name: str) -> Directory | None:
-        if self._id is None: return None
         Logger(f"INode:DIR-{self._id}").log(f"Traversing to '{child_name}'")
         from api.db.filesystem import Filesystem
         return Filesystem().get_child_dir_from_folder(self._id, child_name)
+
+    def get_child(self, child_name: str) -> INode | None:
+        Logger(f"INode:DIR-{self._id}").log(f"Getting '{child_name}'")
+        from api.db.filesystem import Filesystem
+        return Filesystem().get_child_from_folder(self._id, child_name)
+
 
 @attrs.define(kw_only=True)
 class Symlink(INode):
@@ -296,3 +310,10 @@ class Symlink(INode):
 class TreeNode:
     iNode: INode
     children: Optional[List[TreeNode]] = None
+
+@attrs.define(kw_only=True)
+class Resolution:
+    parents: List[Directory]
+    node: Optional[INode | str] = None
+    mount: Optional[Virtual] = None
+    subpath: List[str] = []

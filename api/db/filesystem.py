@@ -5,10 +5,11 @@ import requests, datetime, attrs
 
 from api.db.database import Database
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import StorageNode, NodeStatus, File, Directory, INodeType, Symlink, TreeNode, Permissions, PermissionFlags, User
+from api.db.models import StorageNode, NodeStatus, File, Virtual, Directory, INodeType, Symlink, TreeNode, INode, Permissions, PermissionFlags, User
 from api.db.auth import Auth
 
 from typing import List, Optional
+from api.__init__ import Scheduler, Event
 
 class Filesystem:
     instance = None
@@ -37,6 +38,13 @@ class Filesystem:
         for node in cursor:
             self.cached_nodes.append(StorageNode(address="").from_dict(node))
 
+        # Schedule repeating check event for nodes
+        Scheduler().schedule_event(Event(
+            method=self.check_nodes,
+            timer=10,
+            repeating=True
+        ))
+
         # sanity check
         if self.fs_collection.count_documents({"_id": None}) == 0:
             root_user: User = Auth().root
@@ -48,6 +56,7 @@ class Filesystem:
             )
             root = Directory(
                 parent_id=None,
+                node_type=INodeType.DIR,
                 name="/",
                 permissions=root_permissions,
                 created_at=datetime.datetime.now().timestamp()
@@ -108,6 +117,13 @@ class Filesystem:
         if query is None: return False
         return query.acknowledged
 
+    def sign_new_virtual(self, virtual: Virtual) -> bool:
+        query = self.fs_collection.insert_one(virtual)
+        self.logger.log(f"Attempted to sign new Virtual Device in the db. query={query.acknowledged if query is not None else 'None'}")
+
+        if query is None: return False
+        return query.acknowledged
+
     def sign_new_dir(self, dir: Directory) -> bool:
         query = self.fs_collection.insert_one(dir)
         self.logger.log(f"Attempted to sign new Directory ({dir.name}) in the db. query={query.acknowledged if query is not None else 'None'}")
@@ -126,6 +142,20 @@ class Filesystem:
         query = self.fs_collection.find_one({"parent_id": origin, "name": child_name, "node_type": INodeType.DIR})
         return Directory().from_dict(query) if query is not None else None
 
+    def get_child_from_folder(self, origin: ObjectId | None, child_name: str) -> INode | None:
+        query = self.fs_collection.find_one({"parent_id": origin, "name": child_name})
+        if query is None: return None
+        match query["node_type"]:
+            case INodeType.DIR:
+                return Directory().from_dict(query)
+            case INodeType.FILE:
+                return File().from_dict(query)
+            case INodeType.SYMLINK:
+                return Symlink().from_dict(query)
+            case INodeType.VIRTUAL:
+                return Virtual().from_dict(query)
+        return None
+
     def delete_from_node(self, file: File) -> bool:
         if file.hosted_node_address is None: return False
         hosting_node = self.get_node_from_address(file.hosted_node_address)
@@ -138,6 +168,20 @@ class Filesystem:
         self.logger.log(f"Querying deletion of {file_hash=} from Node@{hosting_node.address}:{hosting_node.port}. {query.status_code=}")
         
         return True if query.status_code == 200 else False
+
+    def del_file(self, file: File) -> bool:
+        query = self.fs_collection.delete_one({"_id": file._id})
+        if not query: return False
+
+        if self.fs_collection.count_documents({"hashed": file.hashed}) == 0: self.delete_from_node(file)
+        return True
+
+    def del_symlink(self, symlink: Symlink) -> bool:
+        query = self.fs_collection.delete_one({"_id": symlink._id})
+        return True if query else False
+
+    def del_directory(self, directory: Directory | Virtual):
+        return True if self.fs_collection.delete_one({"_id": directory._id}) else False
     
     # Returns the traversed path in the order of the given path
     def traverse_full_path(self, path: List[str]) -> List[Directory] | None:
@@ -151,7 +195,12 @@ class Filesystem:
                 traversed_list.append(query)
                 continue
             query = last_dir.get_child_dir(dir)
-            if query is None: return None
+            if query is None:
+                query = last_dir.get_child(dir)
+                if query is None: return None
+                if query.node_type == INodeType.VIRTUAL:
+                    return traversed_list
+                return None
             traversed_list.append(query)
             last_dir = query
             
@@ -182,6 +231,8 @@ class Filesystem:
                 case INodeType.DIR.value:
                     dir = Directory().from_dict(child)
                     node.children.append(self.index_dir(dir, strip_oids))
+                case INodeType.VIRTUAL.value:
+                    pass
 
         return node
 

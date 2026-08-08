@@ -2,23 +2,22 @@ from typing import Optional
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from api.db.filesystem import Filesystem
-from api.db.models import User, StorageNode, File, INodeType, Permissions, Directory, PermissionFlags, RateLimitResponse, Symlink, _jsonable
+from api.db.models import User, StorageNode, File, INodeType, Permissions, INode, Directory, PermissionFlags, RateLimitResponse, Symlink, Resolution, _jsonable
 from api.db.auth import Auth
 from api.db.userinteractions import *
+from api.db.vfs import VFS
 from api.misc.responses import ResponseCodes as code
 from api.db.cache import Cache
 from api.misc.logger import Logger, LoggerLevel
 import tempfile, hashlib, requests, re, datetime
 from django.http import StreamingHttpResponse
 import json
-from bson import ObjectId
-from typing import List
 
 _UNSAFE = re.compile(r"[^\w.\- ]")
 
 def sanitize_filename(name: str | None) -> str:
     if not name:
-        return "blob"
+        return "/"
     name = name.replace("\\", "/").split("/")[-1]   # strip any path, incl. ../
     name = _UNSAFE.sub("", name).strip()            # drop control chars, separators
     return name[:255] or "blob"                     # cap length, never empty
@@ -172,105 +171,94 @@ def put_symlink(request, parent_id, name, user: User):
     
     return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
 
+def get_resolution(user: User, request_path: str) -> Resolution | InteractionResponse:
+    path = request_path.split("/") if request_path[0] == '/' else str(f"/{request_path}").split("/")
+    path = [item for item in path if item != '']
+    
+    item_name       = sanitize_filename(path[-1] if path else "")
+    item_path       = path[:-1]
+    item_path       = [sanitize_filename(dir) for dir in item_path]
+    item_path.insert(0, "/")
 
-def del_file(request, file: File, user: User):
-    fs = Filesystem()
-    query = fs.fs_collection.delete_one({"_id": file._id})
-    if not query: return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+    traversed_list = UserInteractions(user).traverseFullPath(item_path)
+    if isinstance(traversed_list, InteractionResponse):
+        return traversed_list
 
-    if fs.fs_collection.count_documents({"hashed": file.hashed}) == 0: fs.delete_from_node(file)
+    if len(traversed_list) == len(item_path):
+        parent_dir: Directory = traversed_list[-1]
+        item = parent_dir.get_child(item_name)
+        mount = None
+        node = item_name
+        if item is not None and item.node_type == INodeType.VIRTUAL: mount = Virtual().from_dict(item.to_dict())
+        elif item is not None: node = item
+        return Resolution(
+            parents=traversed_list,
+            node=node,
+            mount=mount
+        )
 
-    return Response({"status": "OK"}, code.SUCCESS)
+    # there is a virtual node involved
 
-def del_symlink(request, symlink: Symlink, user: User):
-    fs = Filesystem()
-    query = fs.fs_collection.delete_one({"_id": symlink._id})
-    return Response({"status": "OK"}, code.SUCCESS) if query else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+    mount_name = item_path[len(traversed_list)]
+    virtual_path = item_path[len(traversed_list)+1:]
+    virtual_path.append(item_name)
 
-def del_directory(request, directory: Directory, user: User):
-    fs = Filesystem()
+    mount = None
+    parent_dir: Directory = traversed_list[-1]
+    item = parent_dir.get_child(mount_name)
+    if item is not None and item.node_type == INodeType.VIRTUAL: mount = Virtual().from_dict(item.to_dict())
 
-    dir_children = fs.fs_collection.find({"parent_id": directory._id})
-
-    for child in dir_children:
-        match child["node_type"]:
-            case INodeType.DIR:
-                del_directory(request, Directory().from_dict(child), user)
-            case INodeType.FILE:
-                del_file(request, File().from_dict(child), user)
-            case INodeType.SYMLINK:
-                del_symlink(request, Symlink().from_dict(child), user)
-
-    return Response({"status": "OK"}, code.SUCCESS) if fs.fs_collection.delete_one({"_id": directory._id}) else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+    return Resolution(
+        parents=traversed_list,
+        mount=mount,
+        subpath=virtual_path
+    )
 
 class TraverseView(APIView):
-    # TODO: make common function for all the token verification/path handling
     def put(self, request, subpath="/"): # PermissionFlags.WRITE
         user: User | None = Auth().get_User_from_META_headers(request.META)
         if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
+        resolution = get_resolution(user, subpath)
+        if isinstance(resolution, InteractionResponse):
+            return Response({"status": resolution.message}, code.MALFORMED if resolution.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
 
-        edn_mode_header = request.headers.get("X-EDN-Mode", None)
-        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
-        subpath = [item for item in subpath if item != '']
+        if resolution.mount is not None:
+            return VFS().dispatch(resolution, request, user, "put")
 
-        item_parent_id  = None
-        item_name       = sanitize_filename(subpath[-1] if subpath else "")
-        item_path       = subpath[:-1]
-        item_path       = [sanitize_filename(dir) for dir in item_path]
-
-        if len(subpath) > 1:
-            # item has a parent...
-            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
-            traversed_list = UserInteractions(user).traverseFullPath(item_path)
-            if isinstance(traversed_list, InteractionResponse):
-                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
-            item_parent_id = traversed_list[-1:][0]
-
-        fs = Filesystem()
+        if not isinstance(resolution.node, str): return Response({"status": 'Conflict'}, code.CONFLICT)
         
-        parent_object = fs.fs_collection.find_one({"_id": item_parent_id})
-        if parent_object is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-        flag_query = UserInteractions(user).checkUnknownFlag(parent_object, PermissionFlags.WRITE)
-        if not flag_query: return Response({"status": f"Permission Denied: {parent_object['name']}"}, code.FORBIDDEN)
+        edn_mode_header = request.headers.get("X-EDN-Mode", None)
+
+        parent_object = resolution.parents[-1]
+        flag_query = UserInteractions(user).checkUnknownFlag(parent_object.to_dict(), PermissionFlags.WRITE)
+        if not flag_query: return Response({"status": f"Permission Denied: {parent_object.name}"}, code.FORBIDDEN)
 
         match edn_mode_header:
             case None:
-                return put_file(request, item_parent_id, item_name, user)
+                return put_file(request, parent_object._id, resolution.node, user)
             case "file":
-                return put_file(request, item_parent_id, item_name, user)
+                return put_file(request, parent_object._id, resolution.node, user)
             case "directory":
-                return put_dir(request, item_parent_id, item_name, user)
+                return put_dir(request, parent_object._id, resolution.node, user)
             case "symlink":
-                return put_symlink(request, item_parent_id, item_name, user)
+                return put_symlink(request, parent_object._id, resolution.node, user)
             
         return Response({"status": "Bad X-EDN-Mode Header"}, code.MALFORMED)
 
     def get(self, request, subpath="/"): # PermissionFlags.READ
         user: User | None = Auth().get_User_from_META_headers(request.META)
         if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
-        subpath = [item for item in subpath if item != '']
+        resolution = get_resolution(user, subpath)
+        if isinstance(resolution, InteractionResponse):
+            return Response({"status": resolution.message}, code.MALFORMED if resolution.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
+
+        if resolution.mount is not None:
+            return VFS().dispatch(resolution, request, user, "get")
         
-        item_parent_id  = None
-        item_name       = sanitize_filename(subpath[-1] if subpath else "")
-        item_path       = subpath[:-1]
-        item_path       = [sanitize_filename(dir) for dir in item_path]
-
         fs = Filesystem()
-
-        if not subpath:
-            children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": None, "_id": { "$ne": None } }, {"hosted_node_address": 0})]
-            return Response(children, code.SUCCESS)
-
-        if len(subpath) > 1:
-            # item has a parent...
-            traversed_list = UserInteractions(user).traverseFullPath(item_path)
-            if isinstance(traversed_list, InteractionResponse):
-                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
-            item_parent_id = traversed_list[-1:][0]
-
-        item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name})
-        if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+        
+        if not isinstance(resolution.node, INode): return Response({"status": "Not Found"}, code.NOT_FOUND)
+        item = resolution.node.to_dict()
 
         flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.READ)
         if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
@@ -329,29 +317,15 @@ class TraverseView(APIView):
     def head(self, request, subpath="/"): # PermissionFlags.READ
         user: User | None = Auth().get_User_from_META_headers(request.META)
         if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
-        subpath = [item for item in subpath if item != '']
+        resolution = get_resolution(user, subpath)
+        if isinstance(resolution, InteractionResponse):
+            return Response({"status": resolution.message}, code.MALFORMED if resolution.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
+
+        if resolution.mount is not None:
+            return VFS().dispatch(resolution, request, user, "head")
         
-        item_parent_id  = None
-        item_name       = sanitize_filename(subpath[-1] if subpath else "")
-        item_path       = subpath[:-1]
-        item_path       = [sanitize_filename(dir) for dir in item_path]
-
-        fs = Filesystem()
-
-        if not subpath:
-            return Response({"status": "Forbidden"}, code.FORBIDDEN)
-
-        if len(subpath) > 1:
-            # item has a parent...
-            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
-            traversed_list = UserInteractions(user).traverseFullPath(item_path)
-            if isinstance(traversed_list, InteractionResponse):
-                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
-            item_parent_id = traversed_list[-1:][0]
-
-        item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
-        if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+        if not isinstance(resolution.node, INode): return Response({"status": "Not Found"}, code.NOT_FOUND)
+        item = resolution.node.to_dict()
 
         flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.READ)
         if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
@@ -376,74 +350,51 @@ class TraverseView(APIView):
     def delete(self, request, subpath="/"): # PermissionFlags.WRITE
         user: User | None = Auth().get_User_from_META_headers(request.META)
         if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
-        subpath = [item for item in subpath if item != '']
+        resolution = get_resolution(user, subpath)
+        if isinstance(resolution, InteractionResponse):
+            return Response({"status": resolution.message}, code.MALFORMED if resolution.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
+
+        if resolution.mount is not None:
+            return VFS().dispatch(resolution, request, user, "delete")
+
         
-        item_parent_id  = None
-        item_name       = sanitize_filename(subpath[-1] if subpath else "")
-        item_path       = subpath[:-1]
-        item_path       = [sanitize_filename(dir) for dir in item_path]
-
-        fs = Filesystem()
-
-        if not subpath:
-            return Response({"status": "Forbidden"}, code.FORBIDDEN)
-
-        if len(subpath) > 1:
-            # item has a parent...
-            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
-            traversed_list = UserInteractions(user).traverseFullPath(item_path)
-            if isinstance(traversed_list, InteractionResponse):
-                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
-            item_parent_id = traversed_list[-1:][0]
-
-        item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name})
-        if item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
+        if not isinstance(resolution.node, INode): return Response({"status": "Not Found"}, code.NOT_FOUND)
+        item = resolution.node.to_dict()
 
         flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.WRITE)
         if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
 
+        user_interaction = UserInteractions(user)
+
         match item["node_type"]:
             case INodeType.DIR:
                 item = Directory().from_dict(item)
-                return del_directory(request, item, user)
+                return Response({"status": "Success"}, code.SUCCESS) if user_interaction.deleteDirectory(item).status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
             case INodeType.FILE:
                 item = File().from_dict(item)
-                return del_file(request, item, user)
+                return Response({"status": "Success"}, code.SUCCESS) if user_interaction.deleteFile(item).status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
             case INodeType.SYMLINK:
                 item = Symlink().from_dict(item)
-                return del_symlink(request, item, user)
+                return Response({"status": "Success"}, code.SUCCESS) if user_interaction.deleteSymlink(item).status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
 
         return Response({"status": "Bad Request"}, code.MALFORMED)
 
     def patch(self, request, subpath="/"): # PermissionFlags.WRITE
         user: User | None = Auth().get_User_from_META_headers(request.META)
         if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-        subpath = subpath.split("/") if subpath[0] == '/' else str(f"/{subpath}").split("/")
-        subpath = [item for item in subpath if item != '']
+        resolution = get_resolution(user, subpath)
+        if isinstance(resolution, InteractionResponse):
+            return Response({"status": resolution.message}, code.MALFORMED if resolution.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
+
+        if resolution.mount is not None:
+            return VFS().dispatch(resolution, request, user, "patch")
         
-        item_parent_id  = None
-        item_name       = sanitize_filename(subpath[-1] if subpath else "")
-        item_path       = subpath[:-1]
-        item_path       = [sanitize_filename(dir) for dir in item_path]
-
         fs = Filesystem()
-
-        if not subpath:
-            return Response({"status": "Forbidden"}, code.FORBIDDEN)
-
-        if len(subpath) > 1:
-            # item has a parent...
-            # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
-            traversed_list = UserInteractions(user).traverseFullPath(item_path)
-            if isinstance(traversed_list, InteractionResponse):
-                return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
-            item_parent_id = traversed_list[-1:][0]
-
-        target_item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
-        if target_item is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
-        flag_query = UserInteractions(user).checkUnknownFlag(target_item, PermissionFlags.READ)
-        if not flag_query: return Response({"status": f"Can't open file '{target_item['name']}': Permission Denied"}, code.FORBIDDEN)
+        
+        if not isinstance(resolution.node, INode): return Response({"status": "Not Found"}, code.NOT_FOUND)
+        target_item = resolution.node
+        flag_query = UserInteractions(user).checkUnknownFlag(target_item.to_dict(), PermissionFlags.READ)
+        if not flag_query: return Response({"status": f"Can't open file '{target_item.name}': Permission Denied"}, code.FORBIDDEN)
 
         operation = request.headers.get("X-EDN-Patch", None)
         if operation is None: return Response({"status": "Missing X-EDN-Patch Header"}, code.MALFORMED)
@@ -455,56 +406,43 @@ class TraverseView(APIView):
 
         path = data.get("path", None)
         name = data.get("name", None)
-        target_dir_oid: Optional[ObjectId] = None
 
         if path is not None:
-            path = path.split("/") if path[0] == '/' else str(f"/{path}").split("/")
-            path = [item for item in path if item != '']
+            resolution = get_resolution(user, path)
+            if isinstance(resolution, InteractionResponse):
+                return Response({"status": resolution.message}, code.MALFORMED if resolution.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
+    
+            if resolution.mount is not None:
+                return VFS().dispatch(resolution, request, user, "patch")
             
-            item_parent_id  = None
-            item_name       = sanitize_filename(path[-1] if path else "")
-            item_path       = path[:-1]
-            item_path       = [sanitize_filename(dir) for dir in item_path]
+            if not isinstance(resolution.node, INode): return Response({"status": "Not Found"}, code.NOT_FOUND)
 
-            if len(path) > 1:
-                # item has a parent...
-                # This only checks for the PermissionFlags.READ up to the directory where the item_parent_id is stored
-                traversed_list = UserInteractions(user).traverseFullPath(item_path)
-                if isinstance(traversed_list, InteractionResponse):
-                    return Response({"status": traversed_list.message}, code.MALFORMED if traversed_list.status == InteractionResponseCodes.NONE else code.FORBIDDEN)
-                item_parent_id = traversed_list[-1:][0]
+            if resolution.node.node_type != INodeType.DIR: return Response({"status": "Target is not a directory"}, code.MALFORMED)
 
-                item = fs.fs_collection.find_one({"parent_id": item_parent_id, "name": item_name}, {"hosted_node_address": 0})
-                if item is None: return Response({"status": "Target directory not found"}, code.NOT_FOUND)
-
-                if item["node_type"] != INodeType.DIR: return Response({"status": "Target is not a directory"}, code.MALFORMED)
-                target_dir_oid = item["_id"]
-
-        target_dir = fs.fs_collection.find_one({"_id": target_dir_oid})
-        if target_dir is None: return Response({"status": "Not Found"}, code.NOT_FOUND)
-        readflag_query = UserInteractions(user).checkUnknownFlag(target_dir, PermissionFlags.READ)
-        writeflag_query = UserInteractions(user).checkUnknownFlag(target_dir, PermissionFlags.WRITE)
-        if not readflag_query or not writeflag_query: return Response({"status": f"Permission Denied: {target_dir['name']}"}, code.FORBIDDEN)
+        readflag_query = UserInteractions(user).checkUnknownFlag(resolution.node.to_dict(), PermissionFlags.READ)
+        writeflag_query = UserInteractions(user).checkUnknownFlag(resolution.node.to_dict(), PermissionFlags.WRITE)
+        if not readflag_query or not writeflag_query: return Response({"status": f"Permission Denied: {resolution.node.name}"}, code.FORBIDDEN)
 
         query: Optional[bool] = None
         match operation:
             case "move":
                 if path is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-                if target_item["_id"] in fs.traverse_full_path(path): return Response({"status": "Conflict"}, code.CONFLICT)
-                if target_item["parent_id"] == target_dir_oid: return Response({"status": "ok"}, code.SUCCESS)
-                query = fs.fs_collection.update_one({"_id": target_item["_id"]}, {"$set": {"parent_id": target_dir_oid}})
+                if target_item._id == resolution.node._id or any(p._id == target_item._id for p in resolution.parents): return Response({"status": "Conflict"}, code.CONFLICT)
+                if target_item.parent_id == resolution.node._id: return Response({"status": "ok"}, code.SUCCESS)
+                query = fs.fs_collection.update_one({"_id": target_item._id}, {"$set": {"parent_id": resolution.node._id}})
             case "rename":
                 if name is None: return Response({"status": "Bad Request"}, code.MALFORMED)
                 name = sanitize_filename(name)
-                if not UserInteractions(user).checkUnknownFlag(target_item, PermissionFlags.WRITE): return Response({"status": f"Permission Denied: {target_item['name']}"}, code.FORBIDDEN)
-                update_query = fs.fs_collection.update_one({"_id": target_item["_id"]}, {"$set": {"name": name}})
+                if not UserInteractions(user).checkUnknownFlag(target_item.to_dict(), PermissionFlags.WRITE): return Response({"status": f"Permission Denied: {target_item.name}"}, code.FORBIDDEN)
+                update_query = fs.fs_collection.update_one({"_id": target_item._id}, {"$set": {"name": name}})
                 if update_query is None: return Response({"status": "Conflict"}, code.CONFLICT)
                 query = update_query
             case "copy":
                 if path is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-                if target_item["parent_id"] == target_dir_oid: return Response({"status": "Conflict"}, code.CONFLICT)
-                copy_query = fs.copy_item(target_item, target_dir_oid)
-                if copy_query is None: return Response({"status": "ok"}, code.SUCCESS)
+                if target_item._id == resolution.node._id: return Response({"status": "Conflict"}, code.CONFLICT)
+                if target_item.parent_id == resolution.node._id: return Response({"status": "Conflict"}, code.CONFLICT)
+                copy_query = fs.copy_item(target_item.to_dict(), resolution.node._id)
+                if copy_query is None: return Response({"status": "Conflict"}, code.CONFLICT)
                 query = copy_query
 
         if query is None: return Response({"status": "Invalid X-EDN-Patch Header"}, code.MALFORMED)

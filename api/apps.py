@@ -12,4 +12,6 @@ class ApiConfig(AppConfig):
             return
 
         from api import Scheduler
+        from api.db.vfs import VFS
         Scheduler()
+        VFS().discover()

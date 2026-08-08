@@ -101,10 +101,10 @@ path `/youtube/<id>`. Each directory has its own permissions.
 
 ### Phase 7 — Plugin system
 
-- [ ] Write the contract for a plugin. A plugin registers its routes, finds the
+- [X] Write the contract for a plugin. A plugin registers its routes, finds the
   virtual nodes, and sends the data.
-- [ ] Let an operator attach a plugin to a path in the VFS.
-- [ ] Add permissions for the plugins. Give each plugin the necessary subtrees
+- [X] Let an operator attach a plugin to a path in the VFS.
+- [X] Add permissions for the plugins. Give each plugin the necessary subtrees
   only.
 - [ ] Add a cache for the data that comes from a plugin.
 - [ ] Write the example plugin `/random`. This plugin makes bytes, like

@@ -35,6 +35,8 @@ class Collection:
                 return self.insert_one(Directory().from_dict(document))
             case INodeType.SYMLINK.value:
                 return self.insert_one(Symlink().from_dict(document))
+            case INodeType.VIRTUAL.value:
+                return None
         return None
 
     def bulk_write(self, operations: List[Any]) -> BulkWriteResult:
