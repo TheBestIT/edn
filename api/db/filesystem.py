@@ -45,6 +45,13 @@ class Filesystem:
             repeating=True
         ))
 
+        # Schedule orphan node check
+        Scheduler().schedule_event(Event(
+            method=self.check_orphan_nodes,
+            timer=5*60,
+            repeating=True
+        ))
+
         # sanity check
         if self.fs_collection.count_documents({"_id": None}) == 0:
             root_user: User = Auth().root
@@ -66,6 +73,24 @@ class Filesystem:
             self.fs_collection.collection.insert_one(root_dict)
             self.logger.log(f"Created '/' directory (_id=null)")
 
+    def check_orphan_nodes(self):
+        from api.db.userinteractions import UserInteractions, InteractionResponseCodes
+        from api.db.auth import Auth
+        actor = UserInteractions(Auth().root)
+        all_nodes = self.fs_collection.find({})
+        node_array = []
+        for node in all_nodes:
+            node_array.append(node)
+
+        for node in node_array:
+            if node["_id"] == None: continue
+            parent_id = node.get("parent_id", None)
+            if parent_id is None: continue
+            if True in [check["_id"] == parent_id for check in node_array]: continue
+            query = actor.deleteUnknown(node)
+            self.logger.log(f"Deleting orphan node with id={node['_id']} (name={node['name']})")
+            if query.status != InteractionResponseCodes.OK: continue
+            self.check_orphan_nodes()
 
     def check_nodes(self):
         for node in self.cached_nodes: node.check_health()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Mapping, Optional, List, Generic, Tuple
+from typing import Any, Mapping, Optional, List, Generic, Tuple, Callable
 from typing_extensions import TypeVar
 from enum import Enum
 
@@ -9,7 +9,6 @@ import attrs, requests
 from bson import ObjectId, json_util
 from typing_extensions import Self
 from api.misc.logger import Logger, LoggerLevel
-
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, ObjectId):
@@ -63,12 +62,6 @@ class Model(Generic[IdT]):
 class APIUsage:
     bucket_size: int = 1000
     bucket_refill_rate: float = 5.0  # tokens per second
-    bucket_expire_rate: float = attrs.field(
-        default=attrs.Factory(
-            lambda self: self.bucket_size / self.bucket_refill_rate,
-            takes_self=True,
-        )
-    )
 
 def _as_usage(value: Any) -> APIUsage:
     if isinstance(value, APIUsage):
@@ -78,11 +71,25 @@ def _as_usage(value: Any) -> APIUsage:
     return APIUsage(**value)
 
 @attrs.define(kw_only=True)
-class RateLimitResponse(Model):
+class RateLimitResponse:
     allowed: bool
     tokens: float
     retry_after: float
     usage_policy: APIUsage = attrs.field(converter=_as_usage)
+
+    def build_headers(self) -> dict:
+        headers = {
+            "X-RateLimit-Limit": self.usage_policy.bucket_size,
+            "X-RateLimit-Remaining": self.tokens,
+            "X-RateLimit-Reset": (self.usage_policy.bucket_size - self.tokens) / self.usage_policy.bucket_refill_rate
+        }
+        if not self.allowed:
+            headers["Retry-After"] = self.retry_after
+        return headers
+
+@attrs.define(kw_only=True)
+class RateLimitPrediction(RateLimitResponse):
+    apply: Callable[[], RateLimitResponse] = attrs.field(eq=False, repr=False)
 
 # API/Auth
 

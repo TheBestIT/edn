@@ -1,7 +1,9 @@
-from api.db.models import User, Group, PermissionFlags, INodeType, Directory, File, Symlink, Virtual, Permissions
+from api.db.models import *
 from api.misc.logger import Logger, LoggerLevel
 from api.db.auth import Auth
 from api.db.filesystem import Filesystem
+from api.db.cache import Cache
+from api.db.configs import *
 
 from bson import ObjectId
 from typing import List
@@ -18,6 +20,17 @@ class InteractionResponseCodes(int, Enum):
 class InteractionResponse:
     status: InteractionResponseCodes = InteractionResponseCodes.NONE
     message: str = ""
+
+@attrs.define(kw_only=True)
+class Cost:
+    base: ConfigKeys | float = 1
+    multiplier: float = 1
+
+    def value(self):
+        if isinstance(self.base, float) or isinstance(self.base, int): return self.base * self.multiplier
+        base_value = Configs().get_key(self.base)
+        if base_value is None: return 10
+        return base_value * self.multiplier
 
 class UserInteractions:
     def __init__(self, user: User) -> None:
@@ -66,6 +79,25 @@ class UserInteractions:
         
         return False
 
+    def estimateTreeNodeDeleteCost(self, node: TreeNode) -> Cost:
+        if node.iNode.node_type != INodeType.DIR: return Cost()
+        cost = Cost(base=ConfigKeys.RATE_DELETEDIRCOST)
+        if node.children is None or len(node.children) == 0: return Cost(base=ConfigKeys.RATE_DELETEDIRCOST) 
+        for child in node.children:
+            match child.iNode.node_type:
+                case INodeType.DIR:
+                    query: Cost = self.estimateTreeNodeDeleteCost(child)
+                    cost = Cost(multiplier=query.value()+cost.value())
+                case INodeType.FILE:
+                    file = File().from_dict(child.iNode.to_dict())
+                    if file.size is None: continue
+                    file_cost = Cost(base=ConfigKeys.RATE_DELETEDBYTECOST, multiplier=file.size)
+                    cost = Cost(multiplier=file_cost.value()+cost.value())
+                case INodeType.SYMLINK:
+                    symlink_cost = Cost(base=ConfigKeys.RATE_DELETEDSYMLINKCOST)
+                    cost = Cost(multiplier=symlink_cost.value()+cost.value())
+        return cost
+
     def deleteFile(self, file: File) -> InteractionResponse:
         if file.permissions.check_flag(PermissionFlags.WRITE, self.actor) == False:
             InteractionResponse(
@@ -101,6 +133,20 @@ class UserInteractions:
         query = self.fs_db_instance.del_directory(directory)
         return InteractionResponse(status=InteractionResponseCodes.OK) if query else InteractionResponse(status=InteractionResponseCodes.FAIL)
 
+    def deleteUnknown(self, node: dict) -> InteractionResponse:
+        match node["node_type"]:
+            case INodeType.DIR:
+                dir = Directory().from_dict(node)
+                return self.deleteDirectory(dir)
+            case INodeType.FILE:
+                file = File().from_dict(node)
+                return self.deleteFile(file)
+            case INodeType.SYMLINK:
+                symlink = Symlink().from_dict(node)
+                return self.deleteSymlink(symlink)
+
+        return InteractionResponse()
+
     def signFSVirtual(self, virtual: Virtual) -> InteractionResponse:
         if self.actor._id is None: return InteractionResponse()
         permissions = Permissions(
@@ -112,3 +158,8 @@ class UserInteractions:
         virtual.permissions = permissions
         query = self.fs_db_instance.sign_new_virtual(virtual)
         return InteractionResponse(status=InteractionResponseCodes.OK, message="Success") if query else InteractionResponse(status=InteractionResponseCodes.FAIL)
+
+    def predictUsage(self, cost: Cost) -> RateLimitPrediction:
+        query = Cache().predict(self.actor, cost.value())
+        self.logger.log(f"Query for operation cost prediction; est. cost={cost}. {query=}")
+        return query

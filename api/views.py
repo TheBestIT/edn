@@ -4,8 +4,6 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from api.db.auth import Auth
-from api.db.models import User
-from api.db.cache import Cache
 from api.misc.responses import ResponseCodes as code
 
 
@@ -28,11 +26,5 @@ class RateLimitView_Test(APIView):
         self.COST = 40
 
     def get(self, request):
-        user: User | None = Auth().get_User_from_META_headers(request.META)
-        if user is None: return Response({"status": "Bad Request"}, code.MALFORMED)
-        query = Cache().validate_request(user, self.COST)
-        if not query.allowed:
-            return Response({"status": "Rate Limited"}, code.LIMITED, headers=Cache().build_headers(query))
-            
-        return Response({"status": "OK"}, code.SUCCESS, headers=Cache().build_headers(query))
+        return Response({"status": "OK"}, code.SUCCESS)
 

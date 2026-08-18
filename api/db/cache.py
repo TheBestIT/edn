@@ -5,17 +5,17 @@ import os
 import redis
 
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import User, APIUsage, RateLimitResponse
+from api.db.models import User, RateLimitResponse, RateLimitPrediction
+from functools import partial
 
 # KEYS[1] should be the token
 # ARGV[1] should be the default bucket size
 # ARGV[2] should be the cost of the operation
 # ARGV[3] should be the refill rate (per second)
-# ARGV[4] should be the expire rate (per second)
 
 # had to get a lua crash course just for this btw...
 
-atomic = """
+validate = """
 -- Get Current token bucket status
 local bucket = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
 
@@ -35,18 +35,18 @@ end
 
 local cost        = ARGV[2]
 local refill_rate = ARGV[3]
-local expire_rate = ARGV[4]
+local expire_rate = math.ceil(capacity / refill_rate)
 
 -- Calculate refilling
 local time_diff = now - ts
 tokens = math.min(capacity, tokens + (time_diff * refill_rate))
 
 -- Subtract cost
-local allowed = true
+local allowed = 1
 local retry_after = 0
 tokens = tokens - cost
 if tokens <= 0 then
-    allowed = false
+    allowed = 0
     -- Compute Retry-After Header
     retry_after = (tokens*-1)/refill_rate
     tokens = tokens + cost
@@ -54,6 +54,47 @@ end
 
 redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', now)
 redis.call('EXPIRE', KEYS[1], math.ceil(expire_rate))
+
+return {allowed, tostring(tokens), tostring(retry_after)}
+"""
+
+predict = """
+-- Same as validate lua but stripped of HSET and EXPIRE to "test" the query
+-- Get Current token bucket status
+local bucket = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+
+local tokens = tonumber(bucket[1])
+local ts     = tonumber(bucket[2])
+local time   = redis.call('TIME')
+local now    = tonumber(time[1]) + (tonumber(time[2]) / 1000000)
+
+local capacity = ARGV[1]
+
+-- Check if bucket expired and refill if it did
+if tokens == nil or ts == nil then
+    tokens = capacity
+    ts     = now
+end
+
+local cost        = ARGV[2]
+local refill_rate = ARGV[3]
+local expire_rate = math.ceil(capacity / refill_rate)
+
+-- Calculate refilling
+local time_diff = now - ts
+tokens = math.min(capacity, tokens + (time_diff * refill_rate))
+
+-- Subtract cost
+local allowed = 1
+local retry_after = 0
+tokens = tokens - cost
+if tokens <= 0 then
+    allowed = 0
+    -- Compute Retry-After Header
+    retry_after = (tokens*-1)/refill_rate
+end
+
+tokens = tokens + cost
 
 return {allowed, tostring(tokens), tostring(retry_after)}
 """
@@ -72,12 +113,6 @@ class Cache:
             return
         self._initialized = True
 
-        # TODO: better values... and a db-centered value calculation 
-        self.per_byte_cost      = 0.0001192093
-        self.per_dir_cost       = 10 
-        self.per_existing_cost  = 10
-        self.per_symlink_cost   = 100
-
         self.logger = Logger("cache.master", LoggerLevel.DATABASE)
 
         dockerized = os.environ.get("DOCKERIZED", "0") == "1"
@@ -92,7 +127,8 @@ class Cache:
             health_check_interval=30,
         )
 
-        self.check_rate = self.client.register_script(atomic)
+        self.check_rate = self.client.register_script(validate)
+        self.predict_rate = self.client.register_script(predict)
 
     def validate_request(self, user: User, cost: float) -> RateLimitResponse:
         allowed, tokens, retry_after = cast(
@@ -102,8 +138,7 @@ class Cache:
                 args=[
                     user.usage.bucket_size,
                     cost,
-                    user.usage.bucket_refill_rate,
-                    user.usage.bucket_expire_rate,
+                    user.usage.bucket_refill_rate
                 ],
             ),
         )
@@ -111,15 +146,27 @@ class Cache:
         self.logger.log(f"({user.token}) {allowed=} ({cost=}, {tokens=}); retry after {float(retry_after):.2f}s")
         return RateLimitResponse(allowed=allowed, tokens=float(tokens), retry_after=float(retry_after), usage_policy=user.usage)
 
-    def build_headers(self, rate_limit_query: RateLimitResponse) -> dict:
-        headers = {
-            "X-RateLimit-Limit": rate_limit_query.usage_policy.bucket_size,
-            "X-RateLimit-Remaining": rate_limit_query.tokens,
-            "X-RateLimit-Reset": (rate_limit_query.usage_policy.bucket_size - rate_limit_query.tokens) / rate_limit_query.usage_policy.bucket_refill_rate
-        }
-        if not rate_limit_query.allowed:
-            headers["Retry-After"] = rate_limit_query.retry_after
-        return headers
+    def predict(self, user: User, cost: float) -> RateLimitPrediction:
+        allowed, tokens, retry_after = cast(
+            "list[Any]",
+            self.predict_rate(
+                keys=[f"ratelimit:{user.token}"],
+                args=[
+                    user.usage.bucket_size,
+                    cost,
+                    user.usage.bucket_refill_rate
+                ]
+            )
+        )
+        prediction: RateLimitPrediction = RateLimitPrediction(
+            allowed=allowed,
+            tokens=float(tokens),
+            retry_after=float(retry_after),
+            usage_policy=user.usage,
+            apply=partial(self.validate_request, user=user, cost=cost)
+        )
+        prediction.apply = partial(self.validate_request, user=user, cost=cost)
+        return prediction
 
     def ping(self) -> bool:
         """Report whether Redis is reachable (for health endpoints)."""

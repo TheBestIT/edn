@@ -4,10 +4,10 @@ from rest_framework.response import Response
 from api.db.filesystem import Filesystem
 from api.db.models import User, StorageNode, File, INodeType, Permissions, INode, Directory, PermissionFlags, RateLimitResponse, Symlink, Resolution, _jsonable
 from api.db.auth import Auth
+from api.db.configs import ConfigKeys
 from api.db.userinteractions import *
 from api.db.vfs import VFS
 from api.misc.responses import ResponseCodes as code
-from api.db.cache import Cache
 from api.misc.logger import Logger, LoggerLevel
 import tempfile, hashlib, requests, re, datetime
 from django.http import StreamingHttpResponse
@@ -26,7 +26,7 @@ def put_file(request, parent_id, filename, user: User):
     raw = request._request
     hasher = hashlib.sha256()
     fs = Filesystem()
-    ratelimit = Cache()
+    actor = UserInteractions(user)
     total_bytes = 0
 
     if user._id is None: return Response({"status": "Bad Request"}, code.MALFORMED)
@@ -53,14 +53,14 @@ def put_file(request, parent_id, filename, user: User):
 
         content_type = request.content_type or "application/octet-stream"
         node_address = ""
-        rate_query: Optional[RateLimitResponse] = None
+        rate_query: Optional[RateLimitPrediction] = None
 
         existing_entry = fs.fs_collection.find_one({"hashed": blob_hash})
         if existing_entry is not None:
             existing_entry = File().from_dict(existing_entry)
             if existing_entry.parent_id == parent_id and existing_entry.name == filename: return Response({"status": "OK"}, code.SUCCESS)
             node_address = existing_entry.hosted_node_address
-            rate_query = ratelimit.validate_request(user, ratelimit.per_existing_cost)
+            rate_query = actor.predictUsage(Cost(base=ConfigKeys.RATE_EXISTINGCOST))
         else:
             # Ask fs for suitable node
             node: StorageNode | None = fs.get_first_suitable_node(total_bytes)
@@ -68,16 +68,16 @@ def put_file(request, parent_id, filename, user: User):
                 return Response({"status": "No Available Node found"}, code.INSUFFICIENT_STORAGE)
 
             # Check if Rate-Limit allows operation
-            rate_query = ratelimit.validate_request(user, total_bytes*ratelimit.per_byte_cost)
+            rate_query = actor.predictUsage(Cost(base=ConfigKeys.RATE_BYTECOST, multiplier=total_bytes))
             if not rate_query.allowed:
-                return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
+                return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
 
-            Logger(f"upload:${blob_hash}", LoggerLevel.ENDPOINT).log(f"Calling PUT to node @{node.address}:{node.port} of file of COST={total_bytes*ratelimit.per_byte_cost} ({total_bytes=} at {ratelimit.per_byte_cost} tokens/byte)")
+            Logger(f"upload:${blob_hash}", LoggerLevel.ENDPOINT).log(f"Calling PUT to node @{node.address}:{node.port} of file of {total_bytes=} bytes)")
 
             # Allow operation and passthrough blob
             node_request = requests.put(f"http://{node.address}:{node.port}/blob/{blob_hash}", data=spool)
             if node_request.status_code != 200 and node_request.status_code != 201:
-                return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=ratelimit.build_headers(rate_query))
+                return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=rate_query.build_headers())
 
             node_address = node.address
 
@@ -94,14 +94,14 @@ def put_file(request, parent_id, filename, user: User):
         ))
 
         if db_query == False:
-            return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=ratelimit.build_headers(rate_query))
+            return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=rate_query.build_headers())
 
-        return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
+        return Response({"status": "OK"}, code.CREATED, headers=rate_query.apply().build_headers())
 
 
 def put_dir(request, parent_id, name, user: User):
     fs = Filesystem()
-    ratelimit = Cache()
+    actor = UserInteractions(user)
 
     if user._id is None: return Response({"status": "Bad Request"}, code.MALFORMED)
     if user.groups is None: return Response({"status": "Bad Request"}, code.MALFORMED)
@@ -111,10 +111,10 @@ def put_dir(request, parent_id, name, user: User):
         group=(user.groups[0], PermissionFlags.READ | PermissionFlags.WRITE)
     )
 
-    rate_query = ratelimit.validate_request(user, ratelimit.per_dir_cost)
+    rate_query = actor.predictUsage(Cost(base=ConfigKeys.RATE_DIRCOST))
 
     if not rate_query.allowed:
-        return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
+        return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
 
     query = fs.sign_new_dir(Directory(
         node_type=INodeType.DIR,
@@ -126,14 +126,14 @@ def put_dir(request, parent_id, name, user: User):
 
     if query == False:
         if fs.fs_collection.exists({"parent_id": parent_id, "name": name}):
-            return Response({"status": "Conflict"}, code.CONFLICT, headers=ratelimit.build_headers(rate_query))
-        return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=ratelimit.build_headers(rate_query))
+            return Response({"status": "Conflict"}, code.CONFLICT, headers=rate_query.build_headers())
+        return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=rate_query.build_headers())
 
-    return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
+    return Response({"status": "OK"}, code.CREATED, headers=rate_query.apply().build_headers())
 
 def put_symlink(request, parent_id, name, user: User):
     fs = Filesystem()
-    ratelimit = Cache()
+    actor = UserInteractions(user)
 
     if user._id is None: return Response({"status": "Bad Request"}, code.MALFORMED)
     if user.groups is None: return Response({"status": "Bad Request"}, code.MALFORMED)
@@ -150,10 +150,10 @@ def put_symlink(request, parent_id, name, user: User):
 
     if target is None: return Response({"status": "Bad Request"}, code.MALFORMED)
 
-    rate_query = ratelimit.validate_request(user, ratelimit.per_symlink_cost)
+    rate_query = actor.predictUsage(Cost(base=ConfigKeys.RATE_SYMLINKCOST))
 
     if not rate_query.allowed:
-        return Response({"status": "Rate Limited"}, code.LIMITED, headers=ratelimit.build_headers(rate_query))
+        return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
 
     query = fs.sign_new_symlink(Symlink(
         node_type=INodeType.SYMLINK,
@@ -166,10 +166,10 @@ def put_symlink(request, parent_id, name, user: User):
 
     if query == False:
         if fs.fs_collection.exists({"parent_id": parent_id, "name": name}):
-            return Response({"status": "Conflict"}, code.CONFLICT, headers=ratelimit.build_headers(rate_query))
-        return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=ratelimit.build_headers(rate_query))
+            return Response({"status": "Conflict"}, code.CONFLICT, headers=rate_query.build_headers())
+        return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=rate_query.build_headers())
     
-    return Response({"status": "OK"}, code.CREATED, headers=ratelimit.build_headers(rate_query))
+    return Response({"status": "OK"}, code.CREATED, headers=rate_query.apply().build_headers())
 
 def get_resolution(user: User, request_path: str) -> Resolution | InteractionResponse:
     path = request_path.split("/") if request_path[0] == '/' else str(f"/{request_path}").split("/")
@@ -256,6 +256,7 @@ class TraverseView(APIView):
             return VFS().dispatch(resolution, request, user, "get")
         
         fs = Filesystem()
+        actor = UserInteractions(user)
         
         if not isinstance(resolution.node, INode): return Response({"status": "Not Found"}, code.NOT_FOUND)
         item = resolution.node.to_dict()
@@ -263,17 +264,21 @@ class TraverseView(APIView):
         flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.READ)
         if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
 
+        rate_query = actor.predictUsage(Cost(base=ConfigKeys.RATE_GETQUERYCOST))
+        if not rate_query.allowed:
+            return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
+
         match item["node_type"]:
             case INodeType.DIR:
                 directory = Directory().from_dict(item)
                 children = [_jsonable(child) for child in fs.fs_collection.find({"parent_id": directory._id, "_id": { "$ne": None } }, {"hosted_node_address": 0})]
                 
-                return Response(children, code.SUCCESS)
+                return Response(children, code.SUCCESS, headers=rate_query.apply().build_headers())
             case INodeType.FILE:
                 file = File().from_dict(item)
-                if file.hosted_node_address is None: return Response({"status": "Resource Unavailable"}, code.UNAVAILABLE) 
+                if file.hosted_node_address is None: return Response({"status": "Resource Unavailable"}, code.UNAVAILABLE, headers=rate_query.build_headers()) 
                 storage_node = fs.get_node_from_address(file.hosted_node_address)
-                if storage_node is None: return Response({"status": "Resource Unavailable"}, code.UNAVAILABLE)
+                if storage_node is None: return Response({"status": "Resource Unavailable"}, code.UNAVAILABLE, headers=rate_query.build_headers())
                 node_url = f"http://{storage_node.address}:{storage_node.port}/blob/{file.hashed}"
                 params = {"ct": file.content_type, "fn": file.name}
 
@@ -288,7 +293,7 @@ class TraverseView(APIView):
 
                 if upstream.status_code == 404:
                     upstream.close()
-                    return Response({"status": "Not Found"}, code.NOT_FOUND)
+                    return Response({"status": "Not Found"}, code.NOT_FOUND, headers=rate_query.build_headers())
 
                 def body():
                     try:
@@ -301,6 +306,7 @@ class TraverseView(APIView):
                     body(),
                     status=upstream.status_code,                      # 200 or 206
                     content_type=upstream.headers.get("Content-Type", "application/octet-stream"),
+                    headers=rate_query.apply().build_headers()
                 )
                 for h in ("Content-Length", "Content-Range", "ETag",
                         "Content-Disposition", "Accept-Ranges", "Cache-Control"):
@@ -309,10 +315,10 @@ class TraverseView(APIView):
                 return resp
             case INodeType.SYMLINK:
                 symlink = Symlink().from_dict(item)
-                if symlink.target is None: return Response({"status": "Bad Symlink Target"}, code.MALFORMED)
+                if symlink.target is None: return Response({"status": "Bad Symlink Target"}, code.MALFORMED, headers=rate_query.build_headers())
                 return self.get(request, subpath=symlink.target)
 
-        return Response({"status": "Bad Request"}, code.MALFORMED)
+        return Response({"status": "Bad Request"}, code.MALFORMED, headers=rate_query.build_headers())
 
     def head(self, request, subpath="/"): # PermissionFlags.READ
         user: User | None = Auth().get_User_from_META_headers(request.META)
@@ -330,7 +336,12 @@ class TraverseView(APIView):
         flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.READ)
         if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
 
-        headers = {}
+        actor = UserInteractions(user)
+        rate_query = actor.predictUsage(Cost(base=ConfigKeys.RATE_HEADQUERYCOST))
+        if not rate_query.allowed:
+            return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
+
+        headers = rate_query.apply().build_headers()
         match item["node_type"]:
             case INodeType.DIR:
                 item = Directory().from_dict(item)
@@ -356,7 +367,6 @@ class TraverseView(APIView):
 
         if resolution.mount is not None:
             return VFS().dispatch(resolution, request, user, "delete")
-
         
         if not isinstance(resolution.node, INode): return Response({"status": "Not Found"}, code.NOT_FOUND)
         item = resolution.node.to_dict()
@@ -364,18 +374,35 @@ class TraverseView(APIView):
         flag_query = UserInteractions(user).checkUnknownFlag(item, PermissionFlags.WRITE)
         if not flag_query: return Response({"status": f"Permission Denied: {item['name']}"}, code.FORBIDDEN)
 
+        fs = Filesystem()
+
         user_interaction = UserInteractions(user)
 
         match item["node_type"]:
             case INodeType.DIR:
                 item = Directory().from_dict(item)
-                return Response({"status": "Success"}, code.SUCCESS) if user_interaction.deleteDirectory(item).status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+                dir_tree = fs.index_dir(item)
+                est_query_cost = user_interaction.estimateTreeNodeDeleteCost(dir_tree)
+                rate_query = user_interaction.predictUsage(est_query_cost)
+                if not rate_query.allowed:
+                    return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
+                delete_query = user_interaction.deleteDirectory(item)
+                return Response({"status": "Success"}, code.SUCCESS, headers=rate_query.apply().build_headers()) if delete_query.status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=rate_query.build_headers())
             case INodeType.FILE:
                 item = File().from_dict(item)
-                return Response({"status": "Success"}, code.SUCCESS) if user_interaction.deleteFile(item).status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+                if item.size is None: return Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+                rate_query = user_interaction.predictUsage(Cost(base=ConfigKeys.RATE_DELETEDBYTECOST, multiplier=item.size))
+                if not rate_query.allowed:
+                    return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
+                delete_query = user_interaction.deleteFile(item)
+                return Response({"status": "Success"}, code.SUCCESS, headers=rate_query.apply().build_headers()) if delete_query.status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=rate_query.build_headers())
             case INodeType.SYMLINK:
                 item = Symlink().from_dict(item)
-                return Response({"status": "Success"}, code.SUCCESS) if user_interaction.deleteSymlink(item).status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR)
+                rate_query = user_interaction.predictUsage(Cost(base=ConfigKeys.RATE_DELETEDSYMLINKCOST))
+                if not rate_query.allowed:
+                    return Response({"status": "Rate Limited"}, code.LIMITED, headers=rate_query.build_headers())
+                delete_query = user_interaction.deleteSymlink(item)
+                return Response({"status": "Success"}, code.SUCCESS, headers=rate_query.apply().build_headers()) if delete_query.status == InteractionResponseCodes.OK else Response({"status": "Internal Server Error"}, code.INTERNAL_SERVER_ERROR, headers=rate_query.build_headers())
 
         return Response({"status": "Bad Request"}, code.MALFORMED)
 
