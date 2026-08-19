@@ -294,6 +294,10 @@ class TraverseView(APIView):
                 if upstream.status_code == 404:
                     upstream.close()
                     return Response({"status": "Not Found"}, code.NOT_FOUND, headers=rate_query.build_headers())
+                if upstream.status_code == 417: # Corrupted or Tampered file in node
+                    upstream.close()
+                    UserInteractions(Auth().root).deleteFile(file)
+                    return Response({"status": "File is Corrupted"}, code.UNAVAILABLE, headers=rate_query.build_headers())
 
                 def body():
                     try:

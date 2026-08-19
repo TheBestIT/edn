@@ -68,18 +68,18 @@ path `/youtube/<id>`. Each directory has its own permissions.
   operator replace these permissions.
 - [X] Apply the permissions to the physical nodes, the virtual nodes and the
   streams in the same way.
-- [ ] Add tokens with a limited scope. Such a token gives access to one subtree
+- [X] Add tokens with a limited scope. Such a token gives access to one subtree
   only.
-- [ ] Record all the access and all the changes of the permissions in an audit
+- [X] Record all the access and all the changes of the permissions in an audit
   log.
 
 ### Phase 5 — Streams and files
 
 - [ ] Add the upload and the download of a file. Divide an upload into chunks.
   Let a client continue an upload after an interruption.
-- [ ] Add HTTP range requests. Then a client can go to a different position in
+- [X] Add HTTP range requests. Then a client can go to a different position in
   a media file.
-- [ ] Read and write the data as a stream. Do not put a full file in the
+- [X] Read and write the data as a stream. Do not put a full file in the
   memory.
 - [ ] Add a download of many files and a download of a full directory as an
   archive.
@@ -89,7 +89,7 @@ path `/youtube/<id>`. Each directory has its own permissions.
 
 - [X] Calculate a hash for each blob. Use this hash to make sure that the data
   is correct. Use this hash also to find the identical data.
-- [ ] Examine the hash when the system reads a blob. Thus the system finds
+- [X] Examine the hash when the system reads a blob. Thus the system finds
   damaged data and changed data.
 - [ ] Encrypt the data on the disk. Use a different key for each file (envelope
   encryption).
@@ -116,7 +116,7 @@ path `/youtube/<id>`. Each directory has its own permissions.
 
 ### Phase 8 — Full API
 
-- [ ] Write the full OpenAPI spec for all the endpoints. The clients get all
+- [X] Write the full OpenAPI spec for all the endpoints. The clients get all
   the data about the API from this spec.
 - [ ] Add webhooks and an event stream. They tell a client about the changes,
   the uploads and the plugin events.

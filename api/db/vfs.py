@@ -13,7 +13,7 @@ import pkgutil, importlib.util, datetime
 
 from rest_framework.response import Response
 
-VFS_API_VERSION = 1
+VFS_API_VERSION = 2
 
 @attrs.define(kw_only=True)
 class VirtualRequest:
@@ -109,7 +109,7 @@ class VFS:
         handler = self.handlers.get(plugin_name, None)
 
         if handler is not None and mount is not None: handler.on_unmount(mount)
-        if not self.unregister(plugin_name): return False
+        self.unregister(plugin_name)
 
         if mount is not None:
             query = UserInteractions(self.auth.root).deleteDirectory(mount)
@@ -128,6 +128,7 @@ class VFS:
 
     def dispatch(self, resolution: Resolution, request, user: User, method: str):
         if resolution.mount is None: return Response(status=code.UNAVAILABLE)
+        if not resolution.mount.permissions.check_flag(PermissionFlags.READ, user): return Response({"status": f"Permission Denied: {resolution.mount.name}"}, code.FORBIDDEN)
         if resolution.mount.handler is None: return Response(status=code.UNAVAILABLE)
         handler = self.handlers.get(resolution.mount.handler)
         if handler is None: return Response(status=code.UNAVAILABLE)

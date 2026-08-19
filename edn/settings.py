@@ -75,7 +75,78 @@ SPECTACULAR_SETTINGS = {
     }
 }
 
+# CORS
+#
+# SECURITY WARNING: the policy below permits every origin, method and header.
+# It is for local development only, for example for `scripts/fs_viewer.html`.
+# Make the lists smaller before you go to production.
+
+CORS_ALLOW_METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+CORS_PREFLIGHT_MAX_AGE = 86400
+
+# The browser hides all the other answer headers from the JavaScript code.
+CORS_EXPOSE_HEADERS = [
+    "Content-Length",
+    "Content-Range",
+    "Content-Disposition",
+    "Content-Size",
+    "Accept-Ranges",
+    "ETag",
+    "Retry-After",
+    "X-RateLimit-Limit",
+    "X-RateLimit-Remaining",
+    "X-RateLimit-Reset",
+    "X-EDN-Mode",
+    "X-EDN-SymlinkTarget",
+    "X-Content-Type",
+]
+
+
+class CORSMiddleware:
+    """Add the CORS headers to each answer, and reply to the preflight.
+
+    The middleware sends the origin of the request back, and it permits the
+    headers that the browser asks for. Therefore a page on any origin can use
+    the Authorization header and read the answers of the API.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        # Import here, because Django loads this file before the applications.
+        from django.http import HttpResponse
+        from django.utils.cache import patch_vary_headers
+
+        origin = request.headers.get("Origin")
+        preflight = (
+            request.method == "OPTIONS"
+            and "Access-Control-Request-Method" in request.headers
+        )
+
+        # Answer the preflight here. The views refuse a request that has no
+        # token, and the browser sends no token with a preflight.
+        response = HttpResponse(status=204) if preflight else self.get_response(request)
+
+        patch_vary_headers(response, ("Origin",))
+        if origin is None:
+            return response
+
+        response["Access-Control-Allow-Origin"] = origin
+        response["Access-Control-Allow-Credentials"] = "true"
+        response["Access-Control-Allow-Methods"] = CORS_ALLOW_METHODS
+        response["Access-Control-Allow-Headers"] = request.headers.get(
+            "Access-Control-Request-Headers", "*"
+        )
+        response["Access-Control-Expose-Headers"] = ", ".join(CORS_EXPOSE_HEADERS)
+        response["Access-Control-Max-Age"] = str(CORS_PREFLIGHT_MAX_AGE)
+        return response
+
+
 MIDDLEWARE = [
+    # Keep the CORS middleware first, so that it marks the answers of the
+    # other middlewares too.
+    'edn.settings.CORSMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
