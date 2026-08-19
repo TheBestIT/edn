@@ -1,14 +1,12 @@
 from typing_extensions import Self
 
-import pymongo
+import pymongo, os
 from pymongo.collection import Collection as MongoCollection
 from pymongo.results import InsertOneResult, BulkWriteResult
 from pymongo.errors import DuplicateKeyError
-from pymongo.cursor import Cursor
 from typing import Any, List, Optional
-import json, os
 from api.misc.logger import Logger, LoggerLevel
-from api.db.models import Model, INode, INodeType, File, Directory, Symlink
+from api.db.models import *
 
 class Collection:
     def __init__(self, collection: MongoCollection) -> None:

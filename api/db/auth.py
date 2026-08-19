@@ -26,6 +26,12 @@ class Auth:
         if self.get_User_from_uid(0) is None:
             self.generate_new_user("root", force_id=0)
 
+        if self.get_Group_from_uid(27) is None:
+            self.generate_new_user("sudo", force_id=27, nologin=True)
+
+        if self.get_Group_from_uid(100) is None:
+            self.generate_new_user("users", force_id=100, nologin=True)
+
         root = self.get_User_from_uid(0)
         if root is None: self.logger.fail("Unable to get 'root' (uid=0) account")
         self.root: User = root
@@ -128,6 +134,8 @@ class Auth:
             created_at=datetime.datetime.now().timestamp(),
             nologin=nologin
         )
+
+        if not nologin: user.groups.append(100)
 
         self.logger.log(user.to_dict())
         query = self.users_collection.insert_one(user)

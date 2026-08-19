@@ -102,6 +102,9 @@ class User(Model[int]): # _id is mapped to an int in this call
     groups: List[int]   = []
     nologin: bool       = False
 
+    def privileged(self) -> bool:
+        return any([gid == 0 or gid == 27 for gid in self.groups])
+
 @attrs.define(kw_only=True)
 class Group(Model[int]): # _id is mapped to an int in this call
     name: Optional[str] = None
@@ -202,6 +205,19 @@ class Permissions:
     group: Optional[Tuple[int, int]] = None 
     other: Optional[int] = 0 
 
+    def generate(self, owner: Optional[User] = None, owner_flags: Optional[int] = None, group: Optional[Group] = None, group_flags: Optional[int] = None, other_flags: Optional[int] = 0):
+        PERMISSIONS_RW = PermissionFlags.READ | PermissionFlags.WRITE
+
+        if owner_flags is None: owner_flags = PERMISSIONS_RW
+        if group_flags is None: group_flags = PERMISSIONS_RW
+
+        self.owner = None
+        self.group = None
+
+        if owner is not None and owner._id is not None: self.owner = (owner._id, owner_flags)
+        if group is not None and group._id is not None: self.group = (group._id, group_flags)
+        self.other = other_flags
+
     def check_flag(self, flag: PermissionFlags, user: User) -> bool:
         if user._id == 0 or any(gid == 0 for gid in user.groups): return True
         if self.owner is None or self.group is None: return False
@@ -236,7 +252,6 @@ def _as_Ownership(value: Any) -> Permissions:
     if value is None:
         return Permissions()
     return Permissions(**value)
-
 
 @attrs.define(kw_only=True)
 class INode():

@@ -1,4 +1,4 @@
-from typing import Any, cast, List
+from typing import Any, cast
 from typing_extensions import Self
 
 import os

@@ -5,7 +5,6 @@ from api.db.filesystem import Filesystem
 from api.db.cache import Cache
 from api.db.configs import *
 
-from bson import ObjectId
 from typing import List
 from enum import Enum
 import attrs
@@ -78,6 +77,30 @@ class UserInteractions:
                 return virtual.permissions.check_flag(flag, self.actor)
         
         return False
+
+    def changeNodePermissions(self, node: INode, permissions: Permissions) -> InteractionResponse:
+        diff = node.permissions
+
+        if self.actor.privileged():
+            if permissions.owner is not None: diff.owner = permissions.owner
+            if permissions.group is not None: diff.group = permissions.group
+            if permissions.other is not None: diff.other = permissions.other
+            self.fs_db_instance.fs_collection.update_one({"_id": node._id}, {"$set": {"permissions": attrs.asdict(diff, recurse=True)}})
+            return InteractionResponse(status=InteractionResponseCodes.OK)
+
+        if node.permissions.owner is None: return InteractionResponse(status=InteractionResponseCodes.FAIL)
+        if self.actor._id == node.permissions.owner[0]: 
+            query = node.permissions.check_flag(PermissionFlags.WRITE, user=self.actor)
+            if query:
+                if permissions.group is not None:
+                    if permissions.group[0] not in self.actor.groups:
+                        return InteractionResponse(status=InteractionResponseCodes.FAIL, message=f"Cannot change file group to a group you are not in")
+                    diff.group = permissions.group
+                if permissions.other is not None: diff.other = permissions.other
+                self.fs_db_instance.fs_collection.update_one({"_id": node._id}, {"$set": {"permissions": attrs.asdict(diff, recurse=True)}})
+                return InteractionResponse(status=InteractionResponseCodes.OK)
+
+        return InteractionResponse(status=InteractionResponseCodes.PERMISSION, message="Permission Denied")
 
     def estimateTreeNodeDeleteCost(self, node: TreeNode) -> Cost:
         if node.iNode.node_type != INodeType.DIR: return Cost()

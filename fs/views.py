@@ -2,7 +2,7 @@ from typing import Optional
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from api.db.filesystem import Filesystem
-from api.db.models import User, StorageNode, File, INodeType, Permissions, INode, Directory, PermissionFlags, RateLimitResponse, Symlink, Resolution, _jsonable
+from api.db.models import User, StorageNode, File, INodeType, Permissions, INode, Directory, PermissionFlags, Symlink, Resolution, _jsonable
 from api.db.auth import Auth
 from api.db.configs import ConfigKeys
 from api.db.userinteractions import *

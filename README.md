@@ -48,7 +48,7 @@ path `/youtube/<id>`. Each directory has its own permissions.
   the identical data and keep only one copy.
 - [X] Write a method to divide the data into clusters and shards. Then you can
   add more storage.
-- [ ] Write a layer of background workers. The workers make the indexes,
+- [X] Write a layer of background workers. The workers make the indexes,
   encrypt the data, and get the data from the plugins.
 
 ### Phase 3 — Virtual filesystem
@@ -64,9 +64,9 @@ path `/youtube/<id>`. Each directory has its own permissions.
 
 - [X] Write a permission model for each directory. Use owners, groups and
   roles.
-- [ ] Let a directory get the permissions of its parent directory. Let an
+- [X] Let a directory get the permissions of its parent directory. Let an
   operator replace these permissions.
-- [ ] Apply the permissions to the physical nodes, the virtual nodes and the
+- [X] Apply the permissions to the physical nodes, the virtual nodes and the
   streams in the same way.
 - [ ] Add tokens with a limited scope. Such a token gives access to one subtree
   only.
@@ -87,7 +87,7 @@ path `/youtube/<id>`. Each directory has its own permissions.
 
 ### Phase 6 — Security: hashes and encryption
 
-- [ ] Calculate a hash for each blob. Use this hash to make sure that the data
+- [X] Calculate a hash for each blob. Use this hash to make sure that the data
   is correct. Use this hash also to find the identical data.
 - [ ] Examine the hash when the system reads a blob. Thus the system finds
   damaged data and changed data.
